@@ -1,0 +1,32 @@
+{
+  "name": "research-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build --webpack",
+    "start": "next start --port 3001",
+    "lint": "eslint app --max-warnings=0"
+  },
+  "dependencies": {
+    "@types/mdx": "^2.0.14",
+    "fumadocs-core": "^16.10.5",
+    "fumadocs-mdx": "^15.0.12",
+    "fumadocs-ui": "^16.10.5",
+    "lucide-react": "^1.17.0",
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@tailwindcss/postcss": "^4.3.1",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "eslint": "^9",
+    "eslint-config-next": "^16.2.9",
+    "postcss": "^8",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^6.0.3"
+  }
+}

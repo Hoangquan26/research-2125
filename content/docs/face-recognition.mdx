@@ -1,0 +1,267 @@
+---
+title: Đánh giá công nghệ nhận diện khuôn mặt cho Gym
+description: So sánh triển khai nội bộ, dịch vụ đám mây và mô hình kết hợp theo độ chính xác, tốc độ, khả năng mất mạng, chi phí và quyền riêng tư.
+---
+
+## Phạm vi đánh giá
+
+Nhận diện khuôn mặt trong nghiên cứu này chỉ áp dụng cho **Gym**. Đây là tình huống duy nhất yêu cầu hội viên check-in/out tự động tại quầy, không cần lễ tân thao tác, và vẫn phải hoạt động khi cơ sở mất mạng.
+
+BĐS có thể xem nhận diện khuôn mặt là năng lực bổ sung trong tương lai, nhưng không phải điều kiện bắt buộc của nghiệp vụ hiện tại. Bảo hành không dùng nhận diện khuôn mặt vì chứng cứ chính là ảnh sản phẩm, serial, vị trí và thời gian.
+
+Tài liệu chỉ đánh giá cho **website tại quầy Gym**. Camera chính là camera ngoài kết nối với trình duyệt. Các vấn đề riêng của mobile không nằm trong phạm vi hiện tại.
+
+## Tiêu chí đánh giá
+
+| Tiêu chí | Câu hỏi cần trả lời | Ý nghĩa đối với Gym |
+| --- | --- | --- |
+| Độ chính xác | Hệ thống có nhận đúng hội viên trong điều kiện camera và ánh sáng thực tế không? | Giảm nhận nhầm người và giảm thao tác fallback. |
+| Tốc độ | Từ lúc camera thấy mặt đến lúc tạo check-in mất bao lâu? | Quầy lễ tân cần phản hồi nhanh, không tạo hàng đợi. |
+| Hoạt động khi mất mạng | Khi API hoặc internet lỗi, kiosk có tiếp tục check-in được không? | Đây là yêu cầu bắt buộc của Gym. |
+| Chi phí | Chi phí tăng theo thiết bị, số lượt check-in hay công vận hành? | Gym có tần suất check-in cao nên chi phí theo request cần được kiểm soát. |
+| Quyền riêng tư | Ảnh mặt và embedding có rời khỏi hệ thống nội bộ không? | Dữ liệu khuôn mặt là dữ liệu nhạy cảm, cần hạn chế luồng truyền không cần thiết. |
+| Khả năng vận hành | Nhóm phát triển có kiểm soát được model, ngưỡng và quá trình xử lý lỗi không? | Cần tối ưu dần theo camera, ánh sáng và dữ liệu hội viên thực tế. |
+
+## Phương án 1: Tự xử lý trong hệ thống
+
+Phương án này xử lý nhận diện trong trình duyệt hoặc trong máy chủ nội bộ. Với website tại quầy, hướng triển khai điển hình là:
+
+1. Dùng MediaPipe để phát hiện khuôn mặt trong luồng camera.
+2. Cắt và chuẩn hóa vùng mặt.
+3. Dùng TensorFlow.js, ONNX Runtime Web hoặc face-api.js để tạo embedding.
+4. So sánh embedding với danh sách hội viên đã đăng ký.
+5. Tạo check-in nếu điểm tương đồng vượt ngưỡng.
+
+### Vai trò của từng thư viện
+
+| Thành phần | Vai trò phù hợp | Nhận xét |
+| --- | --- | --- |
+| MediaPipe Face Detector | Phát hiện mặt trong ảnh, video hoặc luồng camera liên tục. | Phù hợp làm tầng đầu vì trả về vùng mặt và một số mốc cơ bản. |
+| TensorFlow.js | Chạy model học máy trực tiếp trong browser hoặc Node.js. | Linh hoạt nếu nhóm muốn dùng model TensorFlow hoặc convert từ Python sang web. |
+| ONNX Runtime Web | Chạy model ONNX trong browser. | Phù hợp nếu chọn model embedding dạng ONNX, dễ tách khỏi framework huấn luyện ban đầu. |
+| face-api.js | Bộ công cụ JavaScript cho detection, landmarks, recognition. | Dễ thử nghiệm nhanh, nhưng cần đánh giá kỹ tốc độ và chất lượng với camera thật. |
+
+### Đánh giá
+
+| Tiêu chí | Mức đánh giá | Phân tích |
+| --- | --- | --- |
+| Độ chính xác | Trung bình đến tốt | Phụ thuộc model, ảnh đăng ký, ánh sáng, camera và ngưỡng. Cần benchmark bằng dữ liệu thật của từng cơ sở. |
+| Tốc độ | Tốt nếu tối ưu | Sau khi model đã cache, xử lý tại kiosk có thể nhanh vì không chờ mạng. Máy yếu hoặc model nặng sẽ làm tăng độ trễ. |
+| Hoạt động khi mất mạng | Rất tốt | Có thể nhận diện và lưu check-in tạm hoàn toàn cục bộ. |
+| Chi phí | Thấp đến trung bình | Không tốn phí theo request, nhưng tốn công nghiên cứu, tối ưu và bảo trì model. |
+| Quyền riêng tư | Tốt | Ảnh mặt và embedding có thể giữ trong hệ thống nội bộ hoặc trên kiosk. |
+| Khả năng vận hành | Khó hơn cloud | Nhóm phải tự quản phiên bản model, threshold, dữ liệu đăng ký, sai số và quy trình fallback. |
+
+### Khi nào nên chọn
+
+Phương án tự xử lý phù hợp khi:
+
+- Gym bắt buộc hoạt động khi mất mạng.
+- Tần suất check-in cao, không muốn trả phí theo từng lượt.
+- Dữ liệu khuôn mặt cần giữ trong phạm vi nội bộ.
+- Nhóm phát triển chấp nhận quá trình đo đạc và tinh chỉnh model theo thực tế.
+
+Điểm yếu chính là độ chính xác ban đầu có thể không bằng dịch vụ cloud, đặc biệt khi ảnh mờ, ánh sáng yếu hoặc hội viên đăng ký quá ít ảnh.
+
+## Phương án 2: Dùng dịch vụ đám mây
+
+Phương án này gửi ảnh hoặc vector lên dịch vụ như AWS Rekognition hoặc Azure Face để so sánh, tìm người hoặc xác thực. Dịch vụ cloud có lợi thế là model được nhà cung cấp vận hành sẵn, tài liệu đầy đủ và dễ tích hợp ở giai đoạn thử nghiệm.
+
+### Dịch vụ đại diện
+
+| Dịch vụ | Năng lực liên quan | Ghi chú nghiên cứu |
+| --- | --- | --- |
+| AWS Rekognition | So sánh khuôn mặt, tìm khuôn mặt trong collection, trả điểm tương đồng. | AWS cho phép đặt ngưỡng tương đồng; những tình huống ảnh hưởng đến quyền của cá nhân nên có rà soát của con người. |
+| Azure Face | Phát hiện, xác thực hoặc nhận diện khuôn mặt, trả thuộc tính và kết quả so khớp. | Một số năng lực nhận diện khuôn mặt của Azure có yêu cầu quyền truy cập hạn chế và chính sách trách nhiệm AI. |
+
+### Đánh giá
+
+| Tiêu chí | Mức đánh giá | Phân tích |
+| --- | --- | --- |
+| Độ chính xác | Tốt | Model được quản lý bởi nhà cung cấp, thường ổn định hơn ở giai đoạn đầu. |
+| Tốc độ | Trung bình | Phụ thuộc mạng, vùng triển khai, kích thước ảnh và tải dịch vụ. |
+| Hoạt động khi mất mạng | Không đáp ứng | Nếu không có mạng thì không thể nhận diện. Đây là điểm yếu lớn nhất với Gym. |
+| Chi phí | Trung bình đến cao | Tính theo lượt gọi hoặc theo tài nguyên cloud; Gym có tần suất check-in cao nên chi phí tăng theo quy mô. |
+| Quyền riêng tư | Cần đánh giá kỹ | Ảnh mặt hoặc dữ liệu sinh trắc học rời khỏi kiosk/hệ thống nội bộ. Cần xem xét đồng ý của người dùng, lưu trữ, vùng dữ liệu và thời hạn giữ dữ liệu. |
+| Khả năng vận hành | Dễ ở phần model, khó ở phần tuân thủ | Không phải tự vận hành model, nhưng cần kiểm soát bảo mật, chi phí, khóa API và quy định dữ liệu cá nhân. |
+
+### Khi nào nên chọn
+
+Phương án cloud phù hợp khi:
+
+- Hệ thống luôn có mạng ổn định.
+- Doanh nghiệp muốn đi nhanh, chưa có năng lực vận hành model.
+- Số lượt check-in không quá lớn hoặc chi phí API chấp nhận được.
+- Đã xử lý đầy đủ yêu cầu pháp lý về dữ liệu khuôn mặt.
+
+Với Gym trong nghiên cứu này, cloud **không nên là phương án duy nhất** vì không đáp ứng yêu cầu mất mạng vẫn check-in được.
+
+## Phương án 3: Kết hợp trực tuyến và cục bộ
+
+Phương án kết hợp dùng xử lý cục bộ làm nền tảng để bảo đảm offline-first, đồng thời có thể dùng máy chủ nội bộ hoặc cloud khi có mạng để tăng chất lượng, kiểm tra lại hoặc cập nhật dữ liệu.
+
+Một kiến trúc hợp lý cho Gym:
+
+1. Kiosk tải model nhẹ, danh sách hội viên, embedding và ngưỡng nhận diện về local.
+2. Khi có mạng, kiosk có thể gọi API nội bộ để nhận diện hoặc kiểm tra kết quả.
+3. Khi mất mạng, kiosk nhận diện trực tiếp trong browser bằng dữ liệu đã cache.
+4. Check-in và audit được lưu tạm trong IndexedDB.
+5. Khi có mạng lại, kiosk đồng bộ check-in, ảnh và metadata về máy chủ.
+
+### Đánh giá
+
+| Tiêu chí | Mức đánh giá | Phân tích |
+| --- | --- | --- |
+| Độ chính xác | Tốt nếu triển khai đúng | Online có thể dùng pipeline mạnh hơn; offline dùng model nhẹ đủ đáp ứng vận hành. |
+| Tốc độ | Tốt | Kiosk không phải chờ cloud trong mọi lượt check-in. Dữ liệu đã cache giúp phản hồi nhanh. |
+| Hoạt động khi mất mạng | Rất tốt | Đáp ứng yêu cầu bắt buộc của Gym. |
+| Chi phí | Trung bình | Tốn công xây dựng đồng bộ và cache, nhưng giảm phụ thuộc chi phí theo request cloud. |
+| Quyền riêng tư | Tốt | Có thể giữ phần lớn ảnh và embedding trong hệ thống nội bộ; cloud nếu dùng thì chỉ là tùy chọn. |
+| Khả năng vận hành | Trung bình đến khó | Cần quản lý version model, snapshot, queue, sync và chống gửi trùng. |
+
+### Khi nào nên chọn
+
+Phương án kết hợp phù hợp khi:
+
+- Offline-first là yêu cầu bắt buộc.
+- Vẫn muốn có khả năng nâng chất lượng nhận diện theo thời gian.
+- Cần cân bằng tốc độ, chi phí và quyền riêng tư.
+- Chấp nhận thiết kế thêm tầng đồng bộ dữ liệu local.
+
+## Bảng so sánh chi tiết
+
+Thang điểm: 1 là yếu, 5 là tốt. Điểm này phục vụ định hướng kiến trúc ban đầu, không thay thế benchmark thực tế.
+
+| Tiêu chí | Tự xử lý trong hệ thống | Dịch vụ đám mây | Kết hợp |
+| --- | ---: | ---: | ---: |
+| Độ chính xác ban đầu | 3 | 4 | 4 |
+| Khả năng cải thiện theo dữ liệu riêng | 5 | 3 | 5 |
+| Tốc độ tại quầy | 4 | 3 | 4 |
+| Hoạt động khi mất mạng | 5 | 1 | 5 |
+| Chi phí khi số lượt check-in tăng | 5 | 2 | 4 |
+| Bảo vệ dữ liệu khuôn mặt | 5 | 2 | 4 |
+| Dễ triển khai thử nghiệm nhanh | 3 | 4 | 3 |
+| Dễ vận hành lâu dài | 3 | 3 | 4 |
+
+## Ước tính chi phí
+
+Chi phí cần được tách thành hai nhóm: chi phí triển khai ban đầu và chi phí vận hành hằng tháng. Với Gym, số lượt nhận diện có thể tăng nhanh vì mỗi hội viên có thể check-in và check-out nhiều lần trong tháng. Do đó, phương án tính phí theo từng lượt gọi API cần được tính trước khi chọn kiến trúc.
+
+Các con số dưới đây là tham khảo tại thời điểm nghiên cứu ngày 24/06/2026. Giá cloud có thể thay đổi theo vùng, loại tài khoản, gói cam kết, tiền tệ và chính sách của nhà cung cấp.
+
+### Tự xử lý trong hệ thống
+
+| Nhóm chi phí | Cách phát sinh | Nhận xét |
+| --- | --- | --- |
+| Camera tại quầy | Mua một lần cho từng kiosk | Nên ưu tiên camera đủ sáng, rõ mặt, ổn định hơn là camera quá rẻ. |
+| Máy tính/kiosk | Mua hoặc tận dụng thiết bị hiện có | Model chạy local cần CPU đủ tốt; nếu dùng WebGL/WebGPU thì GPU tích hợp cũng ảnh hưởng tốc độ. |
+| Phát triển phần mềm | Chi phí một lần và cải tiến định kỳ | Bao gồm capture camera, đăng ký mặt, tạo embedding, so khớp, lưu queue và đồng bộ. |
+| Bảo trì model | Chi phí định kỳ | Cần đo sai số, cập nhật threshold, xử lý ảnh mờ, ảnh thiếu sáng và thay đổi camera. |
+| Phí theo lượt nhận diện | Gần như không có | TensorFlow.js, MediaPipe, ONNX Runtime Web và face-api.js không tạo chi phí API theo từng lượt gọi; chi phí nằm ở thiết bị và công vận hành. |
+
+Ưu điểm lớn của hướng này là chi phí không tăng tuyến tính theo số lượt check-in. Khi số cơ sở hoặc số lượt check-in tăng, chi phí chính vẫn là thiết bị, bảo trì và nâng cấp phần mềm.
+
+### Dịch vụ đám mây
+
+Với AWS Rekognition, nhóm API liên quan đến so sánh/tìm kiếm khuôn mặt như `CompareFaces`, `IndexFaces`, `SearchFacesByImage`, `SearchFaces` thuộc nhóm tính phí theo số ảnh xử lý. Trang giá AWS hiện nêu mức **0.001 USD cho mỗi ảnh** ở một triệu ảnh đầu tiên của nhóm này. Nếu dùng tìm kiếm khuôn mặt theo collection, AWS còn tính phí lưu metadata khuôn mặt, ví dụ **0.00001 USD cho mỗi face vector mỗi tháng**. Nếu bật Face Liveness, giá tham khảo cho 500.000 lượt đầu ở ví dụ AWS là **0.015 USD cho mỗi lượt kiểm tra**.
+
+| Quy mô giả định | Công thức đơn giản với AWS Rekognition Group 1 | Chi phí nhận diện ước tính |
+| --- | --- | --- |
+| 10.000 lượt nhận diện/tháng | `10.000 x 0.001 USD` | Khoảng `10 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
+| 100.000 lượt nhận diện/tháng | `100.000 x 0.001 USD` | Khoảng `100 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
+| 1.000.000 lượt nhận diện/tháng | `1.000.000 x 0.001 USD` | Khoảng `1.000 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
+
+Với Azure Face, trang pricing cho biết gói miễn phí web có **30.000 giao dịch miễn phí mỗi tháng** ở một số vùng, còn gói Standard tính theo mỗi 1.000 giao dịch và có thêm các hạng mục như Face Storage, Train Person Group/Array, Face Liveness và Face Liveness + Verification. Tuy nhiên, giá cụ thể trên trang có thể phụ thuộc vùng/currency và nên chốt bằng Azure Pricing Calculator trước khi lập dự toán chính thức.
+
+| Nhóm chi phí cloud | AWS Rekognition | Azure Face |
+| --- | --- | --- |
+| Nhận diện/xác thực | Tính theo ảnh/API call; nhóm face search/compare có ví dụ 0.001 USD/ảnh ở mức đầu. | Tính theo mỗi 1.000 transaction ở gói Standard; có free tier 30.000 transaction/tháng ở một số vùng. |
+| Lưu dữ liệu khuôn mặt | Tính theo face/user vector lưu mỗi tháng. | Có Face Storage tính theo số khuôn mặt lưu. |
+| Liveness | Tính riêng theo lượt kiểm tra. | Tính riêng cho Face Liveness hoặc Liveness + Verification. |
+| Truyền dữ liệu | Có thể phát sinh theo hạ tầng cloud/storage/network. | Có thể phát sinh theo hạ tầng cloud/storage/network. |
+
+Điểm cần lưu ý: cloud có vẻ rẻ khi số lượt thấp, nhưng Gym có tính lặp cao. Một cơ sở có 500 hội viên, mỗi hội viên trung bình 10 lần đến phòng tập mỗi tháng và mỗi lần có check-in/check-out sẽ tạo khoảng `500 x 10 x 2 = 10.000` lượt nhận diện/tháng. Khi nhân lên nhiều cơ sở, chi phí API tăng trực tiếp theo số lượt.
+
+### Mô hình kết hợp
+
+Mô hình kết hợp có chi phí nằm giữa hai hướng trên. Hệ thống vẫn cần đầu tư phần xử lý cục bộ, nhưng có thể giới hạn cloud hoặc server-side recognition cho các trường hợp cần kiểm tra lại.
+
+| Chiến lược dùng cloud | Cách tính chi phí | Ý nghĩa |
+| --- | --- | --- |
+| Cloud cho mọi lượt check-in | Chi phí tăng theo toàn bộ lượt nhận diện. | Dễ triển khai nhưng không phù hợp yêu cầu mất mạng và tốn chi phí khi mở rộng. |
+| Cloud chỉ khi local không chắc chắn | Chỉ gửi những lượt có điểm thấp, mặt mờ hoặc kết quả nhập nhằng. | Giảm chi phí đáng kể, vẫn có tầng kiểm tra mạnh hơn. |
+| Cloud chỉ dùng giai đoạn thử nghiệm | Dùng cloud để so sánh chất lượng với local trong giai đoạn benchmark. | Phù hợp để chọn threshold/model mà không phụ thuộc cloud lâu dài. |
+
+Với nghiên cứu hiện tại, hướng hợp lý là **không dùng cloud cho mọi lượt check-in**. Cloud nếu dùng nên đóng vai trò tham chiếu hoặc kiểm tra lại trong các ca không chắc chắn.
+
+## Lựa chọn hợp lý cho nghiên cứu này
+
+Lựa chọn hợp lý là **mô hình kết hợp, ưu tiên xử lý cục bộ**.
+
+Lý do:
+
+1. Gym bắt buộc check-in được khi mất mạng, nên cloud-only bị loại khỏi phương án chính.
+2. Camera hiện tại không quá tốt, người dùng ưu tiên tốc độ và khả năng vào phòng tập hơn độ chính xác tuyệt đối.
+3. Tần suất check-in có thể cao, vì vậy phương án tính phí theo request cần được kiểm soát.
+4. Dữ liệu khuôn mặt là dữ liệu nhạy cảm; xử lý cục bộ hoặc nội bộ giúp giảm luồng dữ liệu ra bên ngoài.
+5. Mô hình kết hợp vẫn cho phép dùng API mạnh hơn khi online, nhưng không làm gián đoạn vận hành khi mạng lỗi.
+
+## Phương án triển khai đề xuất
+
+### Giai đoạn 1: Nền tảng cục bộ
+
+- Dùng MediaPipe để phát hiện mặt trong luồng camera.
+- Dùng model embedding chạy trong browser bằng ONNX Runtime Web hoặc TensorFlow.js.
+- Lưu embedding hội viên đã đăng ký vào snapshot local.
+- So khớp bằng cosine similarity.
+- Dùng threshold thận trọng và có fallback bằng số điện thoại, mã hội viên hoặc QR.
+
+Mục tiêu của giai đoạn này là chứng minh kiosk có thể check-in nhanh và hoạt động được khi mất mạng.
+
+### Giai đoạn 2: Bổ sung tầng kiểm tra trực tuyến
+
+- Khi có mạng, gửi kết quả nhận diện hoặc ảnh đã chuẩn hóa lên API nội bộ để kiểm tra lại.
+- Lưu `similarity_score`, `quality_score`, `model_key`, `threshold` vào bản ghi xác thực.
+- Theo dõi tỷ lệ nhận sai, không nhận ra hội viên thật và tỷ lệ fallback.
+
+Mục tiêu của giai đoạn này là tăng độ tin cậy mà không đánh mất năng lực offline.
+
+### Giai đoạn 3: Cân nhắc cloud như tầng tham chiếu
+
+Cloud chỉ nên dùng để thử nghiệm, đối chiếu chất lượng hoặc làm phương án bổ sung cho những cơ sở có mạng ổn định. Không nên dùng cloud làm đường nhận diện duy nhất cho Gym trong phạm vi nghiên cứu này.
+
+## Quy tắc quyết định nhận diện
+
+```txt
+hợp_lệ =
+  tìm được hội viên
+  và điểm_tương_đồng >= ngưỡng
+  và (không có điểm_thứ_hai hoặc điểm_tốt_nhất - điểm_thứ_hai >= khoảng_cách_tối_thiểu)
+  và chất_lượng_ảnh >= ngưỡng_chất_lượng_tối_thiểu
+```
+
+Nếu không đạt điều kiện trên, hệ thống không nên tự động check-in bằng khuôn mặt. Khi đó nên chuyển sang tìm bằng số điện thoại, mã hội viên hoặc QR để tránh nhận nhầm.
+
+## Dữ liệu cần lưu để cải thiện dần
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `matched_member_id` | Hội viên được nhận diện. |
+| `similarity_score` | Điểm tương đồng giữa ảnh hiện tại và dữ liệu đăng ký. |
+| `second_score` | Điểm của kết quả gần đúng thứ hai, dùng để đo độ nhập nhằng. |
+| `quality_score` | Chất lượng ảnh hoặc khuôn mặt đầu vào. |
+| `model_key` | Phiên bản model dùng để nhận diện. |
+| `threshold` | Ngưỡng quyết định tại thời điểm nhận diện. |
+| `recognition_source` | Nguồn xử lý: browser, server nội bộ hoặc cloud. |
+| `fallback_reason` | Lý do chuyển sang mã hội viên, số điện thoại hoặc QR. |
+
+Các dữ liệu này giúp nhóm phát triển tinh chỉnh ngưỡng, so sánh model và đánh giá camera thực tế tại từng cơ sở.
+
+## Tài liệu tham khảo
+
+- [TensorFlow.js](https://www.tensorflow.org/js)
+- [Google AI Edge: MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector)
+- [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/)
+- [face-api.js](https://justadudewhohacks.github.io/face-api.js/docs/index.html)
+- [AWS Rekognition: Comparing faces in images](https://docs.aws.amazon.com/rekognition/latest/dg/faces-comparefaces.html)
+- [Microsoft Azure Face service](https://learn.microsoft.com/en-us/azure/ai-services/face/overview-identity)

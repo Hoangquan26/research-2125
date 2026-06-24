@@ -1,0 +1,290 @@
+---
+title: Đặc tả module ghi nhận hiện trường
+description: Đặc tả nghiên cứu cho module chụp ảnh, tọa độ, thời gian và lưu vết nghiệp vụ trên nền tảng website.
+---
+
+## Mục đích nghiên cứu
+
+Ba tình huống Gym, BĐS và Bảo hành có hình thức vận hành khác nhau, nhưng cùng thuộc một nhóm nghiệp vụ: **ghi nhận một hoạt động thực tế bằng ảnh, tọa độ, thời gian và người thực hiện**. Vì vậy, thay vì xây riêng ba luồng độc lập, có thể thiết kế một module nền tảng để thu thập chứng cứ hiện trường, sau đó mở rộng thêm năng lực nhận diện khuôn mặt khi nghiệp vụ yêu cầu.
+
+Tài liệu này chỉ nghiên cứu cho **website**. Các vấn đề riêng của ứng dụng mobile như camera thiết bị, background sync, push notification hoặc native permission chưa thuộc phạm vi hiện tại. Với Gym, website có thể kết nối camera ngoài tại quầy lễ tân thông qua `getUserMedia`; với BĐS và Bảo hành, website dùng camera hoặc upload ảnh từ trình duyệt khi nhân sự thao tác trên thiết bị có trình duyệt phù hợp.
+
+## Cơ sở kỹ thuật
+
+Trên website, camera được truy cập thông qua `MediaDevices.getUserMedia()`. API này yêu cầu môi trường an toàn như HTTPS hoặc localhost và luôn cần quyền của người dùng trước khi mở camera. Tọa độ hiện tại có thể lấy bằng Geolocation API, trong đó kết quả cần lưu kèm độ chính xác và trạng thái nguồn vị trí. Với luồng Gym offline-first, IndexedDB phù hợp hơn Web Storage vì cần lưu dữ liệu có cấu trúc, ảnh hoặc metadata đồng bộ sau. Các lựa chọn này phù hợp với hướng dẫn nền tảng web của MDN và web.dev.
+
+## Vai trò của module
+
+Module ghi nhận hiện trường có nhiệm vụ tạo một bản ghi audit thống nhất từ các dữ liệu sau:
+
+- Ảnh hoặc nhiều ảnh làm chứng cứ.
+- Tọa độ, độ chính xác vị trí và nguồn vị trí.
+- Thời gian trên thiết bị và thời gian ghi nhận từ máy chủ nếu có.
+- Người thực hiện, thiết bị, workspace và bản ghi nghiệp vụ cần gắn vào.
+- Thông tin toàn vẹn dữ liệu như hash ảnh, khóa chống gửi trùng và trạng thái đồng bộ.
+- Kết quả nhận diện khuôn mặt nếu tình huống sử dụng có bật năng lực này.
+
+Nhận diện khuôn mặt là **năng lực tùy chọn** của module. Gym bắt buộc dùng, BĐS có thể dùng nếu sau này cần xác thực nhân sự, còn Bảo hành không dùng.
+
+## Tình huống sử dụng
+
+| Tình huống | Người dùng chính | Đối tượng gắn dữ liệu | Nhận diện khuôn mặt | Yêu cầu mất mạng |
+| --- | --- | --- | --- | --- |
+| Gym | Hội viên và lễ tân | `CONTACT`, `AUDIT_CHECKIN` | Bắt buộc | Bắt buộc lưu tạm và đồng bộ sau |
+| BĐS | Sale đi gặp khách hoặc đi tuyến điểm | `CALENDAR`, `TASK` | Tùy chọn | Hiện tại ưu tiên gửi trực tuyến |
+| Bảo hành | Kỹ thuật viên đi xử lý ticket | `TASK`, `TICKET` | Không dùng | Hiện tại ưu tiên gửi trực tuyến |
+
+## Thành phần chức năng
+
+| Nhóm | Mô tả nghiên cứu | Ý nghĩa triển khai |
+| --- | --- | --- |
+| Chụp ảnh | Chụp một hoặc nhiều ảnh từ camera web hoặc nhận file upload. | Tạo chứng cứ hình ảnh tại thời điểm thao tác. |
+| Metadata | Lưu tọa độ, độ chính xác, thời gian, địa điểm, người dùng và thiết bị. | Cho phép kiểm tra bối cảnh và độ tin cậy của bản ghi. |
+| Gắn bản ghi nghiệp vụ | Gắn audit vào lịch hẹn, ticket, task, contact hoặc thực thể khác. | Module dùng chung nhưng dữ liệu vẫn nằm đúng nghiệp vụ. |
+| Lưu tạm khi mất mạng | Lưu local và đồng bộ lại sau. | Chỉ bắt buộc cho Gym do yêu cầu vận hành liên tục. |
+| Toàn vẹn chứng cứ | Hash ảnh, khóa chống gửi trùng, trạng thái đồng bộ và nhật ký thao tác. | Giảm rủi ro sửa ảnh, gửi trùng hoặc mất dấu vết. |
+| Quyền truy cập | Theo dõi quyền camera, vị trí và trạng thái mạng. | Giúp giao diện giải thích vì sao không thể ghi nhận. |
+| Rà soát | Xem lại ảnh, metadata và trạng thái hợp lệ. | Hỗ trợ quản lý, lễ tân hoặc bộ phận vận hành kiểm tra sau. |
+
+## Dữ liệu đầu vào
+
+| Trường | Kiểu | Bắt buộc | Ý nghĩa |
+| --- | --- | --- | --- |
+| `workspace_id` | `uuid` | Có | Không gian dữ liệu sở hữu bản ghi. |
+| `actor_id` | `uuid` | Có | Người hoặc hệ thống tạo bản ghi. |
+| `record_id` | `uuid` | Có | Bản ghi nghiệp vụ được gắn audit. |
+| `table_name` | `varchar` | Có | Tên nhóm dữ liệu, ví dụ `CONTACT`, `TASK`, `TICKET`, `CALENDAR`. |
+| `audit_type` | `varchar` | Có | Loại ghi nhận: `GYM_CHECKIN`, `FIELD_CHECKIN`, `WARRANTY_VISIT`. |
+| `evidence_files` | `File[]` | Có | Ảnh chụp hoặc ảnh upload. |
+| `captured_at` | `timestamptz` | Có | Thời gian ghi nhận trên thiết bị. |
+| `location` | `jsonb` | Không | Tọa độ và độ chính xác nếu lấy được. |
+| `location_source` | `varchar` | Không | `GPS`, `NETWORK`, `MANUAL`, `KNOWN_SITE`, `DENIED`, `UNAVAILABLE`. |
+| `location_id` | `uuid` | Không | Mã chi nhánh, dự án, nhà khách hoặc địa điểm đã biết. |
+| `note` | `text` | Không | Ghi chú của người thao tác. |
+| `face_capture` | `File` hoặc frame ảnh | Tùy tình huống | Dữ liệu ảnh dùng cho nhận diện khuôn mặt nếu bật. |
+| `device_info` | `jsonb` | Không | Trình duyệt, camera, kiosk, trạng thái mạng và quyền truy cập. |
+
+## Dữ liệu đầu ra
+
+| Trường | Kiểu | Bắt buộc | Ý nghĩa |
+| --- | --- | --- | --- |
+| `audit_id` | `uuid` | Có | Mã bản ghi audit/check-in. |
+| `status` | `varchar` | Có | `DRAFT`, `PENDING_SYNC`, `SUBMITTED`, `VERIFIED`, `FLAGGED`, `REJECTED`. |
+| `attachments` | `jsonb` | Có | Danh sách ảnh/file đã lưu, kèm hash và trạng thái lưu trữ. |
+| `verification` | `jsonb` | Không | Kết quả xác thực, chủ yếu dùng cho Gym. |
+| `extra_info` | `jsonb` | Không | Metadata mở rộng: permission, device, nguồn ảnh, trạng thái mạng. |
+| `idempotency_key` | `varchar` | Có | Khóa chống gửi trùng khi retry hoặc đồng bộ sau. |
+| `created_at` | `timestamptz` | Có | Thời điểm máy chủ tạo bản ghi. |
+| `updated_at` | `timestamptz` | Có | Thời điểm máy chủ cập nhật gần nhất. |
+
+## Schema đề xuất
+
+| Cột | Kiểu dữ liệu | Bắt buộc | Ý nghĩa | Ví dụ |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | Có | ID bản ghi audit/check-in | `uuid` |
+| `workspace_id` | `uuid` | Có | Workspace sở hữu dữ liệu | `uuid` |
+| `record_id` | `uuid` | Có | Entity được gắn bản ghi | `uuid` |
+| `table_name` | `varchar` | Có | Tên module liên quan | `TASK`, `TICKET`, `CALENDAR`, `CONTACT` |
+| `audit_type` | `varchar` | Có | Loại audit/check-in | `FIELD_CHECKIN`, `GYM_CHECKIN`, `WARRANTY_VISIT` |
+| `status` | `varchar` | Có | Trạng thái bản ghi | `SUBMITTED`, `VERIFIED`, `PENDING_SYNC` |
+| `created_by` | `uuid` | Có | User hoặc service tạo audit | `staff_id` |
+| `captured_at` | `timestamptz` | Có | Thời gian ghi nhận trên thiết bị | `2026-06-18 10:30:00+07` |
+| `server_received_at` | `timestamptz` | Không | Thời gian máy chủ nhận dữ liệu | `2026-06-18 10:30:03+07` |
+| `location` | `jsonb` | Không | Tọa độ và độ chính xác | `{ "lat": 10.77, "long": 106.69, "accuracy": 18 }` |
+| `location_source` | `varchar` | Không | Nguồn vị trí | `GPS`, `NETWORK`, `KNOWN_SITE` |
+| `location_id` | `uuid` | Không | ID địa điểm/site/chi nhánh nếu có | `branch_id`, `property_id` |
+| `attachments` | `jsonb` | Có | Danh sách ảnh/file đã lưu ở module file | `[]` |
+| `verification` | `jsonb` | Không | Kết quả xác thực nếu có | Xem phần nhận diện khuôn mặt |
+| `extra_info` | `jsonb` | Không | Metadata mở rộng | `{}` |
+| `note` | `text` | Không | Ghi chú của nhân viên | `Đã đến kiểm tra hiện trường` |
+| `idempotency_key` | `varchar` | Có | Khóa chống gửi trùng | `uuid` |
+| `created_at` | `timestamptz` | Có | Thời gian tạo trên hệ thống | `now()` |
+| `updated_at` | `timestamptz` | Có | Thời gian cập nhật | `now()` |
+
+## Schema xác thực khuôn mặt
+
+Trường `verification` nên tách khỏi phần audit nền vì không phải tình huống nào cũng cần nhận diện khuôn mặt. Khi dùng cho Gym, có thể lưu theo dạng sau để phục vụ điều chỉnh ngưỡng nhận diện về sau:
+
+```json
+{
+  "workspace_id": "workspace_uuid",
+  "method": "FACE",
+  "face_verification": {
+    "status": "PASSED",
+    "matched_member_id": "member_uuid",
+    "similarity_score": 0.8231,
+    "quality_score": 0.7436,
+    "model_key": "buffalo_sc",
+    "threshold": 0.7
+  }
+}
+```
+
+Các trường như `similarity_score`, `quality_score`, `model_key` và `threshold` giúp nhóm phát triển đánh giá lại chất lượng nhận diện, so sánh giữa model cũ và model mới, hoặc điều chỉnh ngưỡng theo từng cơ sở.
+
+## Thiết kế API đề xuất
+
+Thiết kế API nên tách rõ hai bước: lưu file chứng cứ và tạo bản ghi audit. Cách tách này giúp module file/storage độc lập với module nghiệp vụ.
+
+| API | Phương thức | Mục đích | Ghi chú |
+| --- | --- | --- | --- |
+| `/api/audit-attachments` | `POST` | Nhận ảnh/file, trả về metadata lưu trữ. | Dùng cho ảnh hiện trường, serial, ảnh mặt nếu cần. |
+| `/api/attendance-audits` | `POST` | Tạo audit trực tuyến. | Dùng chung cho Gym, BĐS, Bảo hành khi có mạng. |
+| `/api/attendance-audits/sync` | `POST` | Đồng bộ nhiều audit đã lưu tạm. | Chỉ bắt buộc cho Gym offline-first. |
+| `/api/gym/face-recognition` | `POST` | Nhận diện khuôn mặt trực tuyến. | Chỉ dùng cho Gym. |
+| `/api/gym/offline-snapshot` | `GET` | Tải dữ liệu phục vụ nhận diện offline. | Gồm hội viên, embedding, ngưỡng và phiên bản model. |
+
+### Mẫu yêu cầu tạo audit
+
+```json
+{
+  "workspace_id": "workspace_uuid",
+  "record_id": "target_uuid",
+  "table_name": "TASK",
+  "audit_type": "FIELD_CHECKIN",
+  "created_by": "staff_uuid",
+  "captured_at": "2026-06-18T10:30:00+07:00",
+  "location": {
+    "lat": 10.7712,
+    "long": 106.6973,
+    "accuracy": 18
+  },
+  "location_source": "GPS",
+  "location_id": "site_uuid",
+  "attachments": [
+    {
+      "id": "file_uuid",
+      "kind": "IMAGE",
+      "mime_type": "image/jpeg",
+      "byte_size": 241200,
+      "sha256": "hex_hash",
+      "storage_status": "STORED"
+    }
+  ],
+  "verification": null,
+  "extra_info": {
+    "device": {
+      "platform": "web",
+      "browser": "Chrome",
+      "camera_permission": "granted",
+      "location_permission": "granted",
+      "network_state": "online"
+    }
+  },
+  "note": "Đã đến điểm hẹn",
+  "idempotency_key": "uuid"
+}
+```
+
+### Mẫu phản hồi
+
+```json
+{
+  "id": "audit_uuid",
+  "status": "SUBMITTED",
+  "record_id": "target_uuid",
+  "table_name": "TASK",
+  "audit_type": "FIELD_CHECKIN",
+  "server_received_at": "2026-06-18T10:30:03+07:00",
+  "created_at": "2026-06-18T10:30:03+07:00",
+  "updated_at": "2026-06-18T10:30:03+07:00"
+}
+```
+
+## Mẫu đầu vào và đầu ra theo tình huống
+
+### Gym
+
+Gym yêu cầu nhận diện khuôn mặt và vận hành được khi mất mạng. Bản ghi tạo ra không chỉ là chứng cứ ảnh mà còn là sự kiện check-in/out của hội viên.
+
+```json
+{
+  "input": {
+    "table_name": "CONTACT",
+    "record_id": "member_uuid",
+    "audit_type": "GYM_CHECKIN",
+    "evidence_source": "CAMERA_CAPTURE",
+    "face_required": true,
+    "offline_required": true
+  },
+  "output": {
+    "status": "VERIFIED",
+    "verification": {
+      "method": "FACE",
+      "face_verification": {
+        "status": "PASSED",
+        "matched_member_id": "member_uuid",
+        "similarity_score": 0.8231,
+        "model_key": "buffalo_sc",
+        "threshold": 0.7
+      }
+    },
+    "sync_state": "SUBMITTED_OR_PENDING_SYNC"
+  }
+}
+```
+
+### BĐS
+
+BĐS dùng module để chứng minh sale có mặt tại điểm hẹn, dự án hoặc tài sản cần kiểm tra. Nhận diện khuôn mặt là tùy chọn, không phải điều kiện bắt buộc của nghiệp vụ hiện tại.
+
+```json
+{
+  "input": {
+    "table_name": "CALENDAR",
+    "record_id": "appointment_uuid",
+    "audit_type": "FIELD_CHECKIN",
+    "evidence_source": "CAMERA_CAPTURE_OR_UPLOAD_FILE",
+    "face_required": false,
+    "offline_required": false
+  },
+  "output": {
+    "status": "SUBMITTED",
+    "verification": null,
+    "manager_review": {
+      "purpose": "Xác minh nhân viên đã đến đúng điểm hẹn",
+      "signals": ["image", "location", "captured_at", "known_site"]
+    }
+  }
+}
+```
+
+### Bảo hành
+
+Bảo hành dùng module để chứng minh kỹ thuật viên đã đến địa điểm và đã xử lý đúng sản phẩm hoặc thiết bị. Trọng tâm là ảnh sản phẩm, serial, kết quả sửa chữa và tọa độ; không cần nhận diện khuôn mặt.
+
+```json
+{
+  "input": {
+    "table_name": "TICKET",
+    "record_id": "ticket_uuid",
+    "audit_type": "WARRANTY_VISIT",
+    "evidence_source": "CAMERA_CAPTURE_OR_UPLOAD_FILE",
+    "face_required": false,
+    "offline_required": false
+  },
+  "output": {
+    "status": "SUBMITTED",
+    "verification": null,
+    "review": {
+      "purpose": "Chứng minh đã thay hoặc bảo hành đúng thiết bị",
+      "signals": ["product_image", "serial_image", "location", "captured_at"]
+    }
+  }
+}
+```
+
+## Nguyên tắc thiết kế
+
+- Một module chung chỉ nên chuẩn hóa phần ghi nhận chứng cứ, không ép mọi tình huống dùng cùng một cách xác thực.
+- Ảnh và metadata cần được xem là chứng cứ audit, vì vậy phải có hash, thời gian và khóa chống gửi trùng.
+- Nhận diện khuôn mặt phải được ghi như một lớp xác thực bổ sung, không trộn lẫn với schema audit nền.
+- Gym ưu tiên tốc độ và khả năng hoạt động khi mất mạng hơn độ chính xác tuyệt đối, vì đặc thù kiosk tại quầy cần thao tác không chạm.
+- BĐS và Bảo hành hiện tại không yêu cầu offline-first; nếu mất mạng, hướng triển khai trước mắt là giữ dữ liệu ở giao diện để người dùng gửi lại khi có mạng.
+
+## Tài liệu tham khảo
+
+- [MDN: MediaDevices.getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)
+- [MDN: Geolocation.getCurrentPosition](https://developer.mozilla.org/en-US/docs/Web/API/Geolocation/getCurrentPosition)
+- [MDN: IndexedDB API](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)
+- [web.dev: Offline cookbook](https://web.dev/articles/offline-cookbook)

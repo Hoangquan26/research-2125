@@ -1,0 +1,216 @@
+---
+title: Đánh giá luồng offline-first cho Gym
+description: Phân tích cache model trên client, cache vector hội viên, chiến lược so khớp và mức độ khả thi khi triển khai trên website.
+---
+
+## Lý do cần offline-first
+
+Gym là tình huống duy nhất trong nghiên cứu này bắt buộc hoạt động khi mất mạng. Nếu internet tại cơ sở chập chờn, hội viên vẫn cần vào phòng tập, lễ tân không nên phải ghi tay rồi nhập lại sau. Vì vậy, website tại quầy phải có khả năng nhận diện cục bộ, tạo check-in tạm thời và đồng bộ về máy chủ khi kết nối phục hồi.
+
+Offline-first không có nghĩa là mọi thứ luôn chạy offline. Cách hiểu đúng là hệ thống ưu tiên trực tuyến khi có mạng, nhưng có một đường xử lý cục bộ đủ tin cậy khi mất mạng.
+
+## Kiến trúc đề xuất
+
+Luồng offline-first cho Gym nên được chia thành năm lớp:
+
+| Lớp | Chức năng | Ghi chú triển khai |
+| --- | --- | --- |
+| Camera | Lấy khung hình từ camera quầy lễ tân. | Trình duyệt dùng `getUserMedia`, yêu cầu HTTPS hoặc localhost và quyền camera. |
+| Model cục bộ | Phát hiện mặt và tạo embedding ngay trên client. | Model cần đủ nhẹ để tải nhanh và chạy được trên máy kiosk phổ thông. |
+| Vector hội viên | Lưu embedding đã đăng ký của hội viên tại client. | Dữ liệu này cần có phiên bản, thời điểm đồng bộ và cơ chế cập nhật. |
+| Hàng đợi local | Lưu check-in và audit khi mất mạng. | Dùng IndexedDB để lưu dữ liệu có cấu trúc, trạng thái sync và khóa chống gửi trùng. |
+| Đồng bộ | Gửi dữ liệu local về máy chủ khi có mạng. | Máy chủ phải xử lý idempotency để tránh tạo trùng check-in. |
+
+## Cache model trên client
+
+Cache model trên client là điều kiện quan trọng để kiosk không phụ thuộc mạng khi nhận diện. Model có thể được đóng gói ở dạng ONNX, TensorFlow.js GraphModel hoặc định dạng khác phù hợp với runtime chạy trong browser.
+
+| Thành phần | Nội dung cần cache | Mục đích |
+| --- | --- | --- |
+| Face detector | Model phát hiện vùng mặt. | Tìm mặt trong khung hình camera trước khi tạo embedding. |
+| Face embedding model | Model biến ảnh mặt thành vector đặc trưng. | Tạo vector để so sánh với dữ liệu hội viên đã đăng ký. |
+| Model metadata | `model_key`, phiên bản, kích thước, ngày phát hành, hash file. | Kiểm tra model đúng phiên bản và không bị lỗi tải. |
+| Runtime config | Input size, chuẩn căn chỉnh mặt, chuẩn normalize, backend tính toán. | Đảm bảo client và backend hiểu cùng một cách xử lý. |
+
+### Cách cache
+
+| Cách lưu | Phù hợp với | Nhận xét |
+| --- | --- | --- |
+| HTTP cache | File model public, ít thay đổi. | Dễ triển khai nhưng khó kiểm soát trạng thái chi tiết trong ứng dụng. |
+| Cache Storage | App shell, file model, asset tĩnh. | Phù hợp nếu dùng service worker để chủ động cache. |
+| IndexedDB | Model bytes và metadata cần kiểm soát. | Phù hợp khi muốn biết chính xác model nào đang nằm trên kiosk. |
+
+Khuyến nghị cho nghiên cứu này: dùng IndexedDB để lưu metadata và có thể lưu model bytes nếu cần kiểm soát chặt phiên bản. Nếu model được phục vụ qua URL có cache header tốt, vẫn nên lưu thêm metadata trong IndexedDB để biết kiosk đang dùng `model_key` nào.
+
+## Cache vector hội viên
+
+Vector hội viên là tập embedding được tạo ở thời điểm đăng ký khuôn mặt. Khi offline, kiosk dùng vector này để so sánh 1:N với embedding mới tạo từ camera.
+
+| Dữ liệu | Kiểu | Ý nghĩa |
+| --- | --- | --- |
+| `member_id` | `uuid` | Hội viên tương ứng với vector. |
+| `embedding_id` | `uuid` | Mã vector, một hội viên có thể có nhiều vector. |
+| `vector` | `float[]` hoặc binary typed array | Dữ liệu dùng để so khớp cosine similarity. |
+| `model_key` | `varchar` | Model tạo vector. Client chỉ nên so vector cùng `model_key`. |
+| `quality_score` | `number` | Chất lượng ảnh đăng ký ban đầu. |
+| `created_at` | `timestamptz` | Thời điểm tạo vector. |
+| `revoked_at` | `timestamptz` | Nếu vector bị thu hồi hoặc hội viên không còn hợp lệ. |
+
+### Vấn đề cần chú ý
+
+- Nếu backend và client dùng hai model khác nhau để tạo embedding, vector có thể không tương thích. Không nên so embedding từ model A với vector sinh bởi model B.
+- Mỗi hội viên nên có nhiều vector ở các góc và điều kiện ánh sáng khác nhau để giảm lỗi không nhận ra người thật.
+- Snapshot cần có `snapshot_version` hoặc `synced_at` để biết kiosk có đang dùng dữ liệu quá cũ không.
+- Khi hội viên bị khóa, hết hạn hoặc xóa khuôn mặt, snapshot phải cập nhật để kiosk không tiếp tục cho vào phòng tập khi offline.
+
+## Chiến lược model: backend mạnh và client nhẹ
+
+Có hai hướng chính khi thiết kế model cho Gym offline-first.
+
+### Hướng A: Backend dùng model mạnh, client dùng model nhẹ
+
+Ở hướng này, backend có thể dùng model chính xác hơn hoặc nặng hơn, còn client dùng model nhẹ để phục vụ khi mất mạng. Đây là hướng hấp dẫn vì tận dụng được tài nguyên máy chủ khi online, nhưng có một vấn đề quan trọng: **embedding phải tương thích**.
+
+| Ưu điểm | Hạn chế |
+| --- | --- |
+| Backend có thể chạy model chính xác hơn, dễ cập nhật và dễ benchmark. | Nếu client và backend dùng model khác nhau, phải lưu hai bộ vector hoặc có cách ánh xạ riêng. |
+| Online có thể xử lý ảnh chất lượng cao hơn và log đầy đủ hơn. | Tăng độ phức tạp dữ liệu, vì mỗi hội viên có thể cần vector cho backend và vector cho client. |
+| Client nhẹ hơn, dễ chạy trên máy kiosk yếu. | Kết quả online và offline có thể khác nhau, gây khó giải thích khi cùng một người lúc nhận được lúc không. |
+
+Để hướng này khả thi, cần lưu rõ:
+
+- `server_model_key`
+- `client_model_key`
+- `server_embedding[]`
+- `client_embedding[]`
+- `threshold` riêng cho từng model
+- `quality_score` riêng cho ảnh đăng ký
+
+Hướng này phù hợp khi mục tiêu dài hạn là độ chính xác cao hơn, nhưng giai đoạn đầu phải chấp nhận chi phí thiết kế dữ liệu cao hơn.
+
+### Hướng B: Backend và client dùng cùng một model nhẹ
+
+Ở hướng này, cùng một model embedding nhẹ được dùng ở cả backend và client. Vector tạo ở backend có thể đồng bộ xuống client và client so khớp trực tiếp khi offline.
+
+| Ưu điểm | Hạn chế |
+| --- | --- |
+| Đơn giản hơn, vì chỉ có một loại embedding và một `model_key`. | Độ chính xác bị giới hạn bởi model nhẹ. |
+| Kết quả online và offline dễ nhất quán hơn. | Nếu model nhẹ kém trong điều kiện ảnh khó, cần fallback bằng mã hội viên/QR. |
+| Dễ triển khai snapshot vector, threshold và sync. | Muốn nâng model phải có quy trình re-embed toàn bộ hội viên. |
+| Phù hợp với kiosk cần tốc độ và offline-first. | Không tận dụng tối đa tài nguyên backend khi online. |
+
+Hướng này phù hợp nhất cho giai đoạn nghiên cứu và MVP vì giảm rủi ro kiến trúc. Với yêu cầu hiện tại: camera không quá tốt, khách Gym ưu tiên tốc độ và mất mạng vẫn check-in được, một model nhẹ dùng thống nhất là phương án thực tế hơn.
+
+## So sánh hai hướng
+
+| Tiêu chí | Backend mạnh + client nhẹ | Cùng model nhẹ ở backend và client |
+| --- | --- | --- |
+| Độ chính xác online | Cao hơn nếu backend model tốt | Trung bình đến tốt |
+| Độ chính xác offline | Phụ thuộc client model nhẹ | Tương đương online nếu cùng dữ liệu |
+| Tính nhất quán online/offline | Trung bình | Cao |
+| Độ phức tạp dữ liệu vector | Cao, có thể cần hai bộ vector | Thấp, một bộ vector theo `model_key` |
+| Chi phí phát triển | Cao | Trung bình |
+| Khả năng triển khai MVP | Trung bình | Cao |
+| Khả năng nâng cấp dài hạn | Cao | Trung bình, cần re-embed khi đổi model |
+| Phù hợp với yêu cầu hiện tại | Khá phù hợp nhưng phức tạp | Phù hợp nhất |
+
+## Mức độ khả thi
+
+| Hạng mục | Mức khả thi | Lý do |
+| --- | --- | --- |
+| Cache model nhẹ trên client | Cao | Trình duyệt có thể cache model và chạy inference bằng TensorFlow.js hoặc ONNX Runtime Web. Cần chọn model đủ nhỏ. |
+| Cache vector hội viên trong IndexedDB | Cao | IndexedDB phù hợp dữ liệu có cấu trúc; số hội viên Gym thường đủ nhỏ để lưu local theo cơ sở. |
+| So khớp cosine 1:N trên client | Cao với quy mô vừa | Với vài nghìn hội viên và vector đã normalize, tính dot product trong browser là khả thi. |
+| Đồng bộ check-in sau khi online | Cao | Cần `idempotency_key`, trạng thái sync và API nhận batch. |
+| Dùng backend model mạnh song song | Trung bình | Tốt cho dài hạn nhưng tăng độ phức tạp vì cần quản lý hai loại embedding. |
+| Chạy hoàn toàn cloud-only | Thấp cho yêu cầu hiện tại | Không đáp ứng yêu cầu mất mạng. |
+| Chống giả mạo nâng cao/liveness offline | Trung bình đến thấp | Có thể nghiên cứu sau; nếu làm nghiêm túc sẽ tăng độ phức tạp và chi phí. |
+
+Kết luận khả thi: **offline-first cho Gym là khả thi**, nếu phạm vi ban đầu tập trung vào model nhẹ, cache vector theo cơ sở, so khớp local và đồng bộ sau. Không nên bắt đầu bằng hai model song song nếu mục tiêu là MVP ổn định.
+
+## Quy trình đề xuất
+
+1. **Khi có mạng**
+   - Kiosk tải hoặc cập nhật model nhẹ.
+   - Kiosk tải snapshot gồm hội viên hợp lệ, embedding, threshold, margin, cooldown và `snapshot_version`.
+   - Máy chủ ghi nhận kiosk đang dùng `model_key` nào.
+
+2. **Khi nhận diện online**
+   - Nếu API sẵn sàng, có thể để backend nhận diện bằng cùng model nhẹ hoặc xác nhận lại kết quả client gửi lên.
+   - Kết quả tạo check-in và audit ngay trên server.
+
+3. **Khi mất mạng**
+   - Client dùng model đã cache để tạo embedding.
+   - Client so embedding với vector trong IndexedDB.
+   - Nếu điểm đủ ngưỡng và không nhập nhằng, tạo check-in tạm.
+   - Nếu không chắc chắn, chuyển sang mã hội viên, số điện thoại hoặc QR.
+
+4. **Khi online trở lại**
+   - Client gửi batch check-in và audit lên server.
+   - Server kiểm tra `idempotency_key`, `client_event_id`, trạng thái hội viên và thời gian.
+   - Server trả `stored` hoặc `duplicate`; client xóa bản ghi local đã xác nhận.
+
+## Quy tắc nhận diện cục bộ
+
+```txt
+hợp_lệ =
+  tìm được hội viên
+  và model_key của vector khớp với model_key của client
+  và điểm_tương_đồng >= ngưỡng
+  và (không có điểm_thứ_hai hoặc điểm_tốt_nhất - điểm_thứ_hai >= khoảng_cách_tối_thiểu)
+  và chưa vượt quá giới hạn cooldown
+```
+
+Quy tắc này giúp tránh ba lỗi phổ biến: dùng sai phiên bản vector, nhận nhầm người khi điểm thấp và nhận nhầm khi hai hội viên có điểm gần nhau.
+
+## Chống gửi trùng
+
+Khi hệ thống mất mạng, một thao tác có thể được gửi lại nhiều lần do người dùng bấm lại, trình duyệt retry hoặc mạng chập chờn. Vì vậy, mỗi sự kiện cần có khóa chống trùng:
+
+| Khóa | Áp dụng cho | Ý nghĩa |
+| --- | --- | --- |
+| `idempotency_key` | Check-in/out | Đảm bảo một lượt check-in không bị tính nhiều lần. |
+| `client_event_id` | Audit ảnh và metadata | Đảm bảo một bằng chứng hiện trường không bị tạo trùng khi đồng bộ. |
+
+Máy chủ nên trả trạng thái `stored` nếu bản ghi mới được lưu và `duplicate` nếu bản ghi đã tồn tại. Cả hai trạng thái này đều cho phép kiosk xóa bản ghi local.
+
+## Rủi ro và cách giảm thiểu
+
+| Rủi ro | Cách giảm thiểu |
+| --- | --- |
+| Model không tải được | Giữ model cũ nếu còn hợp lệ, cảnh báo tại kiosk, cho phép fallback bằng mã hội viên hoặc QR. |
+| Vector snapshot quá cũ | Hiển thị `synced_at`, đặt hạn sử dụng snapshot và bắt buộc cập nhật khi online. |
+| Backend và client dùng sai model | Bắt buộc kiểm tra `model_key`; không so vector khác model. |
+| Nhận nhầm người | Dùng threshold thận trọng, margin giữa hai kết quả tốt nhất, lưu audit để rà soát. |
+| Hội viên hết hạn nhưng kiosk đang offline | Snapshot cần chứa trạng thái hội viên và hạn dùng; server rà soát lại khi sync. |
+| Mất dữ liệu local | Không xóa queue cho đến khi server xác nhận `stored` hoặc `duplicate`. |
+| Ảnh mờ nhưng vẫn nhận | Lưu điểm chất lượng ảnh và theo dõi tỷ lệ fallback/flagged. |
+| Đồng hồ thiết bị sai | Lưu cả thời gian thiết bị và thời gian server nhận bản ghi. |
+
+## Lựa chọn khuyến nghị
+
+Trong giai đoạn nghiên cứu và MVP, nên chọn **cùng một model nhẹ cho backend và client**.
+
+Lý do:
+
+1. Dễ đồng bộ vector vì chỉ có một `model_key`.
+2. Kết quả online và offline dễ giải thích hơn.
+3. Phù hợp với yêu cầu mất mạng vẫn check-in được.
+4. Giảm rủi ro triển khai so với việc duy trì hai bộ embedding.
+5. Có thể nâng cấp sau bằng cách phát hành model mới, re-embed hội viên và đồng bộ snapshot mới xuống kiosk.
+
+Sau khi có dữ liệu vận hành thực tế, có thể nghiên cứu thêm mô hình backend mạnh + client nhẹ. Khi đó backend dùng model mạnh để kiểm tra lại các trường hợp nhập nhằng, còn client vẫn đảm bảo check-in cơ bản khi mất mạng.
+
+## Vì sao BĐS và Bảo hành chưa dùng offline-first
+
+BĐS và Bảo hành trong phạm vi hiện tại được xem là các nghiệp vụ gửi trực tuyến. Nếu mất mạng, hướng nghiên cứu trước mắt là giữ ảnh và metadata trên giao diện để người dùng gửi lại, không âm thầm tạo hàng đợi đồng bộ. Lý do là hai nghiệp vụ này cần gắn chứng cứ vào lịch hẹn, task hoặc ticket cụ thể, và việc gửi trễ có thể làm sai lệch quá trình quản lý nếu không có quy trình kiểm soát riêng.
+
+Nếu sau này cần offline cho BĐS hoặc Bảo hành, nên thiết kế thành một pha nghiên cứu riêng: quyền lưu tạm, thời hạn giữ dữ liệu local, mã hóa dữ liệu trên thiết bị, cách người quản lý duyệt bản ghi gửi trễ và trách nhiệm khi thiết bị bị mất.
+
+## Tài liệu tham khảo
+
+- [MDN: IndexedDB API](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)
+- [web.dev: Offline cookbook](https://web.dev/articles/offline-cookbook)
+- [MDN: MediaDevices.getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)
+- [TensorFlow.js](https://www.tensorflow.org/js)
+- [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/)
