@@ -63,6 +63,67 @@ Phương án tự xử lý phù hợp khi:
 
 Điểm yếu chính là độ chính xác ban đầu có thể không bằng dịch vụ cloud, đặc biệt khi ảnh mờ, ánh sáng yếu hoặc hội viên đăng ký quá ít ảnh.
 
+### Danh sách model/stack khả dụng hiện tại
+
+Luồng nhận diện khuôn mặt trên client nên tách thành ba bài toán: **phát hiện mặt**, **căn chỉnh mặt** và **tạo embedding để so khớp hội viên**. Một model phát hiện mặt tốt chưa đủ để nhận diện hội viên; nó chỉ giúp tìm vùng mặt trong ảnh. Trước khi tạo embedding, ảnh mặt nên được căn chỉnh để giảm sai lệch do nghiêng đầu, lệch camera hoặc crop không ổn định.
+
+#### Model phát hiện mặt
+
+| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
+| --- | --- | --- | --- |
+| MediaPipe BlazeFace short-range | Dưới 1 MB với bản detector nhẹ. | Rất nhẹ, tối ưu cho webcam/selfie gần, có hỗ trợ luồng video trực tiếp. Tài liệu Google ghi nhận độ trễ thấp trên thiết bị di động. | Chỉ là phát hiện mặt, không tạo embedding nhận diện hội viên. |
+| MediaPipe BlazeFace full-range | Khoảng dưới 1 MB đến vài MB tùy bản build. | Phù hợp khoảng cách xa hơn hoặc khung hình rộng hơn. | Không cần thiết nếu camera đặt gần quầy check-in. |
+| MediaPipe BlazeFace Sparse full-range | Thường nhỏ hơn bản full-range đầy đủ. | Nhẹ hơn bản full-range, phù hợp thiết bị yếu hơn. | Có thể đánh đổi chất lượng phát hiện trong một số điều kiện. |
+| face-api.js TinyFaceDetector | Khoảng vài trăm KB đến vài MB tùy weight và backend. | Dễ thử nghiệm, chạy trong browser, cộng đồng dùng nhiều. | Dự án không phải lựa chọn chính thức của Google/Microsoft; cần tự benchmark và kiểm tra bảo trì. |
+
+Kết luận cho bước phát hiện mặt: **MediaPipe BlazeFace short-range** là lựa chọn hợp lý nhất cho kiosk Gym tại quầy vì camera thường đặt gần mặt hội viên, yêu cầu phản hồi nhanh và cần chạy ổn trong trình duyệt.
+
+#### Căn chỉnh mặt
+
+Căn chỉnh mặt, hay face alignment, là bước chuẩn hóa ảnh mặt sau khi đã phát hiện được vùng mặt và trước khi đưa ảnh vào model embedding. Mục tiêu là làm cho các ảnh đầu vào có cùng hướng nhìn, cùng tỷ lệ và cùng vị trí tương đối của mắt, mũi, miệng. Nếu bỏ qua bước này, cùng một hội viên có thể sinh ra vector khác nhau nhiều chỉ vì đầu hơi nghiêng, camera đặt lệch hoặc bounding box crop không ổn định.
+
+| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
+| --- | --- | --- | --- |
+| Alignment bằng landmark 5 điểm | Rất nhỏ nếu dùng landmark có sẵn từ detector hoặc landmark model nhẹ. | Đủ cho nhu cầu nhận diện cơ bản: căn theo hai mắt, mũi và hai khóe miệng. Tốc độ tốt, dễ triển khai. | Không xử lý tốt biểu cảm mạnh, mặt quay nghiêng nhiều hoặc che khuất. |
+| MediaPipe Face Landmarker | Model bundle có thể lớn hơn detector đơn giản vì gồm nhiều bước xử lý landmark. | Cho nhiều landmark hơn, có thể dùng cho kiểm tra chất lượng mặt và mở rộng về sau. | Có thể nặng quá mức nếu kiosk chỉ cần check-in nhanh. Cần benchmark trên máy thật. |
+| face-api.js landmark model | Khoảng vài trăm KB đến vài MB tùy weight. | Dễ dựng PoC cùng face-api.js, có sẵn pipeline landmark. | Cần kiểm tra độ ổn định và hiệu năng nếu dùng lâu dài trong kiosk production. |
+| Không alignment, chỉ crop bounding box | Không phát sinh model hoặc dữ liệu bổ sung. | Triển khai nhanh nhất. | Không nên dùng làm hướng chính vì embedding dễ dao động khi mặt nghiêng hoặc crop lệch. |
+
+Với Gym kiosk, hướng hợp lý là dùng **alignment 5 điểm** trong MVP. Client lấy landmark mắt, mũi và miệng, sau đó xoay/crop/resize ảnh mặt về input chuẩn của model embedding, ví dụ `112x112` hoặc `160x160` tùy model. MediaPipe Face Landmarker nên được xem là lựa chọn mở rộng nếu cần kiểm tra chất lượng mặt chi tiết hơn, còn không nên đưa vào đường chính khi yêu cầu ưu tiên tốc độ và offline.
+
+Metadata của bước alignment nên được lưu cùng kết quả nhận diện để phục vụ debug:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `alignment_method` | Cách căn chỉnh, ví dụ `FIVE_POINT_LANDMARK` hoặc `BOUNDING_BOX_ONLY`. |
+| `landmark_model_key` | Phiên bản model landmark nếu có dùng model riêng. |
+| `face_crop_size` | Kích thước ảnh sau căn chỉnh, ví dụ `112x112`. |
+| `face_angle` | Góc xoay ước lượng của mặt trước khi căn chỉnh. |
+| `alignment_quality` | Điểm chất lượng căn chỉnh, dùng để flag ảnh khó hoặc fallback. |
+
+#### Model tạo embedding
+
+| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
+| --- | --- | --- | --- |
+| MobileFaceNet-like model | Khoảng 2-8 MB với biến thể nhẹ đã tối ưu. | Nhẹ, phù hợp thiết bị client, thường được dùng cho bài toán embedding khuôn mặt trên thiết bị tài nguyên vừa phải. | Cần chọn nguồn model tin cậy, chuẩn hóa input và benchmark bằng dữ liệu thật. |
+| ArcFace nhẹ, ví dụ backbone mobile | Khoảng 5-15 MB với bản mobile; bản lớn có thể cao hơn nhiều. | Cho embedding chất lượng tốt hơn nếu model được huấn luyện tốt; dễ lưu `model_key` và đồng bộ vector. | Bản ArcFace lớn có thể nặng; cần chọn biến thể nhỏ cho browser. |
+| face-api.js FaceRecognitionNet | Khoảng vài MB đến hơn 10 MB tùy bộ weight đi kèm. | Dễ dựng PoC end-to-end vì thư viện có sẵn detection/landmark/recognition. | Model và pipeline cần kiểm chứng với camera thật; không tối ưu riêng cho bài toán Gym. |
+| Model cloud embedding | Không cache model trên kiosk; dung lượng client gần như không đáng kể. | Chất lượng ban đầu tốt, ít tự vận hành model. | Không chạy offline; vector/collection phụ thuộc nhà cung cấp. |
+
+Kết luận cho bước embedding: với phạm vi hiện tại, nên ưu tiên **model nhẹ dạng MobileFaceNet-like hoặc ArcFace mobile chạy bằng ONNX Runtime Web**. Hai hướng này cân bằng tốt giữa tốc độ, khả năng cache trên client và khả năng đồng bộ vector theo `model_key`.
+
+#### Đánh giá mức tối ưu
+
+| Bộ lựa chọn | Tốc độ | Độ chính xác kỳ vọng | Offline | Độ phức tạp |
+| --- | --- | --- | --- | --- |
+| MediaPipe BlazeFace short-range + MobileFaceNet-like ONNX | Cao | Trung bình đến tốt | Tốt | Trung bình |
+| MediaPipe BlazeFace short-range + ArcFace mobile ONNX | Khá cao | Tốt nếu model phù hợp | Tốt | Trung bình đến cao |
+| face-api.js end-to-end | Trung bình | Trung bình, cần đo | Tốt | Thấp |
+| Cloud-only AWS/Azure | Trung bình | Tốt | Không đạt | Thấp ở model, cao ở chi phí/tuân thủ |
+| Backend mạnh + client nhẹ | Online tốt, offline khá | Tốt online, khá offline | Tốt nếu có client fallback | Cao |
+
+Lựa chọn đề xuất hiện tại: **MediaPipe BlazeFace short-range để phát hiện mặt, kết hợp một model embedding nhẹ chạy bằng ONNX Runtime Web trên client**. Backend nên dùng cùng model trong giai đoạn đầu để tránh phải lưu hai bộ vector khác nhau. Khi đã có dữ liệu vận hành thực tế, có thể thử backend model mạnh hơn để kiểm tra lại các trường hợp nhập nhằng.
+
 ## Phương án 2: Dùng dịch vụ đám mây
 
 Phương án này gửi ảnh hoặc vector lên dịch vụ như AWS Rekognition hoặc Azure Face để so sánh, tìm người hoặc xác thực. Dịch vụ cloud có lợi thế là model được nhà cung cấp vận hành sẵn, tài liệu đầy đủ và dễ tích hợp ở giai đoạn thử nghiệm.
@@ -261,6 +322,7 @@ Các dữ liệu này giúp nhóm phát triển tinh chỉnh ngưỡng, so sánh
 
 - [TensorFlow.js](https://www.tensorflow.org/js)
 - [Google AI Edge: MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector)
+- [Google AI Edge: MediaPipe Face Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker)
 - [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/)
 - [face-api.js](https://justadudewhohacks.github.io/face-api.js/docs/index.html)
 - [AWS Rekognition: Comparing faces in images](https://docs.aws.amazon.com/rekognition/latest/dg/faces-comparefaces.html)
