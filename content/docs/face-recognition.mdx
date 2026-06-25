@@ -3,130 +3,126 @@ title: Đánh giá công nghệ nhận diện khuôn mặt cho Gym
 description: So sánh triển khai nội bộ, dịch vụ đám mây và mô hình kết hợp theo độ chính xác, tốc độ, khả năng mất mạng, chi phí và quyền riêng tư.
 ---
 
-## Phạm vi đánh giá
+## Tóm tắt định hướng
 
-Nhận diện khuôn mặt trong nghiên cứu này chỉ áp dụng cho **Gym**. Đây là tình huống duy nhất yêu cầu hội viên check-in/out tự động tại quầy, không cần lễ tân thao tác, và vẫn phải hoạt động khi cơ sở mất mạng.
+Nghiên cứu này đánh giá cách triển khai nhận diện khuôn mặt cho kiosk Gym trên website. Trọng tâm không chỉ là model nào chính xác hơn, mà là hệ thống có chạy ổn tại quầy, phản hồi nhanh, xử lý được mất mạng và lưu đủ dữ liệu để vận hành lâu dài hay không.
 
-BĐS có thể xem nhận diện khuôn mặt là năng lực bổ sung trong tương lai, nhưng không phải điều kiện bắt buộc của nghiệp vụ hiện tại. Bảo hành không dùng nhận diện khuôn mặt vì chứng cứ chính là ảnh sản phẩm, serial, vị trí và thời gian.
+Kết luận triển khai hiện tại là nên ưu tiên **xử lý cục bộ trên kiosk**, gồm detect mặt, căn chỉnh mặt, tạo embedding và so khớp với vector hội viên đã cache. Cloud như AWS Rekognition hoặc Azure Face có thể dùng để benchmark, kiểm tra lại ca nhập nhằng hoặc hỗ trợ cơ sở có mạng ổn định, nhưng không nên là đường nhận diện duy nhất cho Gym vì không đáp ứng offline-first và không trả raw embedding để client tự so khớp khi mất mạng.
 
-Tài liệu chỉ đánh giá cho **website tại quầy Gym**. Camera chính là camera ngoài kết nối với trình duyệt. Các vấn đề riêng của mobile không nằm trong phạm vi hiện tại.
+Nói ngắn gọn: cloud có thể giúp đối chiếu, nhưng kiosk cần tự đứng được. Nếu mạng chập chờn mà quầy check-in ngừng hoạt động, kiến trúc đó không phù hợp với bài toán Gym.
 
-## Tiêu chí đánh giá
+## Ba phần trọng tâm để triển khai
 
-| Tiêu chí | Câu hỏi cần trả lời | Ý nghĩa đối với Gym |
+| Phần | Việc cần làm | Lý do quan trọng |
 | --- | --- | --- |
-| Độ chính xác | Hệ thống có nhận đúng hội viên trong điều kiện camera và ánh sáng thực tế không? | Giảm nhận nhầm người và giảm thao tác fallback. |
-| Tốc độ | Từ lúc camera thấy mặt đến lúc tạo check-in mất bao lâu? | Quầy lễ tân cần phản hồi nhanh, không tạo hàng đợi. |
-| Hoạt động khi mất mạng | Khi API hoặc internet lỗi, kiosk có tiếp tục check-in được không? | Đây là yêu cầu bắt buộc của Gym. |
-| Chi phí | Chi phí tăng theo thiết bị, số lượt check-in hay công vận hành? | Gym có tần suất check-in cao nên chi phí theo request cần được kiểm soát. |
-| Quyền riêng tư | Ảnh mặt và embedding có rời khỏi hệ thống nội bộ không? | Dữ liệu khuôn mặt là dữ liệu nhạy cảm, cần hạn chế luồng truyền không cần thiết. |
-| Khả năng vận hành | Nhóm phát triển có kiểm soát được model, ngưỡng và quá trình xử lý lỗi không? | Cần tối ưu dần theo camera, ánh sáng và dữ liệu hội viên thực tế. |
+| Camera và chất lượng ảnh | Mở đúng camera, chọn frame rõ mặt, kiểm tra blur, sáng tối, kích thước mặt và số lượng mặt trong khung hình. | Ảnh đầu vào xấu làm mọi model phía sau kém ổn định, kể cả cloud. |
+| Pipeline local | Detect mặt, căn chỉnh, tạo embedding, so khớp cosine và quyết định theo threshold/margin. | Đây là đường chính giúp kiosk phản hồi nhanh và vẫn chạy khi mất mạng. |
+| Audit và fallback | Lưu kết quả nhận diện, model, điểm số, ngưỡng, ảnh chứng cứ và chuyển sang QR/số điện thoại khi không chắc chắn. | Hệ thống cần giải thích được quyết định và tránh tự động check-in sai người. |
 
 ## Phương án 1: Tự xử lý trong hệ thống
 
-Phương án này xử lý nhận diện trong trình duyệt hoặc trong máy chủ nội bộ. Với website tại quầy, hướng triển khai điển hình là:
+Phương án này đặt pipeline nhận diện trong trình duyệt hoặc trong máy chủ nội bộ do hệ thống kiểm soát. Với kiosk Gym, hướng phù hợp nhất là xử lý phần realtime ngay trên client: camera mở bằng `getUserMedia()`, client detect mặt liên tục, chọn frame đủ tốt, căn chỉnh ảnh mặt, tạo embedding và so với vector hội viên đã cache.
+
+Luồng triển khai điển hình:
 
 1. Dùng MediaPipe để phát hiện khuôn mặt trong luồng camera.
 2. Cắt và chuẩn hóa vùng mặt.
-3. Dùng TensorFlow.js, ONNX Runtime Web hoặc face-api.js để tạo embedding.
+3. Dùng model embedding như MobileFaceNet-like hoặc ArcFace mobile để tạo vector khuôn mặt.
 4. So sánh embedding với danh sách hội viên đã đăng ký.
 5. Tạo check-in nếu điểm tương đồng vượt ngưỡng.
 
-### Vai trò của từng thư viện
+### Pipeline nhận diện
 
-| Thành phần | Vai trò phù hợp | Nhận xét |
-| --- | --- | --- |
-| MediaPipe Face Detector | Phát hiện mặt trong ảnh, video hoặc luồng camera liên tục. | Phù hợp làm tầng đầu vì trả về vùng mặt và một số mốc cơ bản. |
-| TensorFlow.js | Chạy model học máy trực tiếp trong browser hoặc Node.js. | Linh hoạt nếu nhóm muốn dùng model TensorFlow hoặc convert từ Python sang web. |
-| ONNX Runtime Web | Chạy model ONNX trong browser. | Phù hợp nếu chọn model embedding dạng ONNX, dễ tách khỏi framework huấn luyện ban đầu. |
-| face-api.js | Bộ công cụ JavaScript cho detection, landmarks, recognition. | Dễ thử nghiệm nhanh, nhưng cần đánh giá kỹ tốc độ và chất lượng với camera thật. |
+Không nên bắt đầu bằng việc so sánh thư viện, vì mỗi thư viện có thể nằm ở một tầng khác nhau. Bài toán nên được hiểu theo pipeline: phát hiện mặt, kiểm tra chất lượng, chuẩn hóa ảnh mặt, tạo vector, lưu vector và so khớp. TensorFlow.js hoặc ONNX Runtime Web là **runtime chạy model**; MediaPipe, face-api.js, AWS Rekognition và Azure Face là các công cụ/pipeline có thể tham gia vào một hoặc nhiều bước.
 
-### Đánh giá
-
-| Tiêu chí | Mức đánh giá | Phân tích |
-| --- | --- | --- |
-| Độ chính xác | Trung bình đến tốt | Phụ thuộc model, ảnh đăng ký, ánh sáng, camera và ngưỡng. Cần benchmark bằng dữ liệu thật của từng cơ sở. |
-| Tốc độ | Tốt nếu tối ưu | Sau khi model đã cache, xử lý tại kiosk có thể nhanh vì không chờ mạng. Máy yếu hoặc model nặng sẽ làm tăng độ trễ. |
-| Hoạt động khi mất mạng | Rất tốt | Có thể nhận diện và lưu check-in tạm hoàn toàn cục bộ. |
-| Chi phí | Thấp đến trung bình | Không tốn phí theo request, nhưng tốn công nghiên cứu, tối ưu và bảo trì model. |
-| Quyền riêng tư | Tốt | Ảnh mặt và embedding có thể giữ trong hệ thống nội bộ hoặc trên kiosk. |
-| Khả năng vận hành | Khó hơn cloud | Nhóm phải tự quản phiên bản model, threshold, dữ liệu đăng ký, sai số và quy trình fallback. |
-
-### Khi nào nên chọn
-
-Phương án tự xử lý phù hợp khi:
-
-- Gym bắt buộc hoạt động khi mất mạng.
-- Tần suất check-in cao, không muốn trả phí theo từng lượt.
-- Dữ liệu khuôn mặt cần giữ trong phạm vi nội bộ.
-- Nhóm phát triển chấp nhận quá trình đo đạc và tinh chỉnh model theo thực tế.
-
-Điểm yếu chính là độ chính xác ban đầu có thể không bằng dịch vụ cloud, đặc biệt khi ảnh mờ, ánh sáng yếu hoặc hội viên đăng ký quá ít ảnh.
-
-### Danh sách model/stack khả dụng hiện tại
-
-Luồng nhận diện khuôn mặt trên client nên tách thành ba bài toán: **phát hiện mặt**, **căn chỉnh mặt** và **tạo embedding để so khớp hội viên**. Một model phát hiện mặt tốt chưa đủ để nhận diện hội viên; nó chỉ giúp tìm vùng mặt trong ảnh. Trước khi tạo embedding, ảnh mặt nên được căn chỉnh để giảm sai lệch do nghiêng đầu, lệch camera hoặc crop không ổn định.
-
-#### Model phát hiện mặt
-
-| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
-| --- | --- | --- | --- |
-| MediaPipe BlazeFace short-range | Dưới 1 MB với bản detector nhẹ. | Rất nhẹ, tối ưu cho webcam/selfie gần, có hỗ trợ luồng video trực tiếp. Tài liệu Google ghi nhận độ trễ thấp trên thiết bị di động. | Chỉ là phát hiện mặt, không tạo embedding nhận diện hội viên. |
-| MediaPipe BlazeFace full-range | Khoảng dưới 1 MB đến vài MB tùy bản build. | Phù hợp khoảng cách xa hơn hoặc khung hình rộng hơn. | Không cần thiết nếu camera đặt gần quầy check-in. |
-| MediaPipe BlazeFace Sparse full-range | Thường nhỏ hơn bản full-range đầy đủ. | Nhẹ hơn bản full-range, phù hợp thiết bị yếu hơn. | Có thể đánh đổi chất lượng phát hiện trong một số điều kiện. |
-| face-api.js TinyFaceDetector | Khoảng vài trăm KB đến vài MB tùy weight và backend. | Dễ thử nghiệm, chạy trong browser, cộng đồng dùng nhiều. | Dự án không phải lựa chọn chính thức của Google/Microsoft; cần tự benchmark và kiểm tra bảo trì. |
-
-Kết luận cho bước phát hiện mặt: **MediaPipe BlazeFace short-range** là lựa chọn hợp lý nhất cho kiosk Gym tại quầy vì camera thường đặt gần mặt hội viên, yêu cầu phản hồi nhanh và cần chạy ổn trong trình duyệt.
-
-#### Căn chỉnh mặt
-
-Căn chỉnh mặt, hay face alignment, là bước chuẩn hóa ảnh mặt sau khi đã phát hiện được vùng mặt và trước khi đưa ảnh vào model embedding. Mục tiêu là làm cho các ảnh đầu vào có cùng hướng nhìn, cùng tỷ lệ và cùng vị trí tương đối của mắt, mũi, miệng. Nếu bỏ qua bước này, cùng một hội viên có thể sinh ra vector khác nhau nhiều chỉ vì đầu hơi nghiêng, camera đặt lệch hoặc bounding box crop không ổn định.
-
-| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
-| --- | --- | --- | --- |
-| Alignment bằng landmark 5 điểm | Rất nhỏ nếu dùng landmark có sẵn từ detector hoặc landmark model nhẹ. | Đủ cho nhu cầu nhận diện cơ bản: căn theo hai mắt, mũi và hai khóe miệng. Tốc độ tốt, dễ triển khai. | Không xử lý tốt biểu cảm mạnh, mặt quay nghiêng nhiều hoặc che khuất. |
-| MediaPipe Face Landmarker | Model bundle có thể lớn hơn detector đơn giản vì gồm nhiều bước xử lý landmark. | Cho nhiều landmark hơn, có thể dùng cho kiểm tra chất lượng mặt và mở rộng về sau. | Có thể nặng quá mức nếu kiosk chỉ cần check-in nhanh. Cần benchmark trên máy thật. |
-| face-api.js landmark model | Khoảng vài trăm KB đến vài MB tùy weight. | Dễ dựng PoC cùng face-api.js, có sẵn pipeline landmark. | Cần kiểm tra độ ổn định và hiệu năng nếu dùng lâu dài trong kiosk production. |
-| Không alignment, chỉ crop bounding box | Không phát sinh model hoặc dữ liệu bổ sung. | Triển khai nhanh nhất. | Không nên dùng làm hướng chính vì embedding dễ dao động khi mặt nghiêng hoặc crop lệch. |
-
-Với Gym kiosk, hướng hợp lý là dùng **alignment 5 điểm** trong MVP. Client lấy landmark mắt, mũi và miệng, sau đó xoay/crop/resize ảnh mặt về input chuẩn của model embedding, ví dụ `112x112` hoặc `160x160` tùy model. MediaPipe Face Landmarker nên được xem là lựa chọn mở rộng nếu cần kiểm tra chất lượng mặt chi tiết hơn, còn không nên đưa vào đường chính khi yêu cầu ưu tiên tốc độ và offline.
-
-Metadata của bước alignment nên được lưu cùng kết quả nhận diện để phục vụ debug:
-
-| Trường | Ý nghĩa |
-| --- | --- |
-| `alignment_method` | Cách căn chỉnh, ví dụ `FIVE_POINT_LANDMARK` hoặc `BOUNDING_BOX_ONLY`. |
-| `landmark_model_key` | Phiên bản model landmark nếu có dùng model riêng. |
-| `face_crop_size` | Kích thước ảnh sau căn chỉnh, ví dụ `112x112`. |
-| `face_angle` | Góc xoay ước lượng của mặt trước khi căn chỉnh. |
-| `alignment_quality` | Điểm chất lượng căn chỉnh, dùng để flag ảnh khó hoặc fallback. |
-
-#### Model tạo embedding
-
-| Lựa chọn | Dung lượng tham khảo | Điểm mạnh | Hạn chế |
-| --- | --- | --- | --- |
-| MobileFaceNet-like model | Khoảng 2-8 MB với biến thể nhẹ đã tối ưu. | Nhẹ, phù hợp thiết bị client, thường được dùng cho bài toán embedding khuôn mặt trên thiết bị tài nguyên vừa phải. | Cần chọn nguồn model tin cậy, chuẩn hóa input và benchmark bằng dữ liệu thật. |
-| ArcFace nhẹ, ví dụ backbone mobile | Khoảng 5-15 MB với bản mobile; bản lớn có thể cao hơn nhiều. | Cho embedding chất lượng tốt hơn nếu model được huấn luyện tốt; dễ lưu `model_key` và đồng bộ vector. | Bản ArcFace lớn có thể nặng; cần chọn biến thể nhỏ cho browser. |
-| face-api.js FaceRecognitionNet | Khoảng vài MB đến hơn 10 MB tùy bộ weight đi kèm. | Dễ dựng PoC end-to-end vì thư viện có sẵn detection/landmark/recognition. | Model và pipeline cần kiểm chứng với camera thật; không tối ưu riêng cho bài toán Gym. |
-| Model cloud embedding | Không cache model trên kiosk; dung lượng client gần như không đáng kể. | Chất lượng ban đầu tốt, ít tự vận hành model. | Không chạy offline; vector/collection phụ thuộc nhà cung cấp. |
-
-Kết luận cho bước embedding: với phạm vi hiện tại, nên ưu tiên **model nhẹ dạng MobileFaceNet-like hoặc ArcFace mobile chạy bằng ONNX Runtime Web**. Hai hướng này cân bằng tốt giữa tốc độ, khả năng cache trên client và khả năng đồng bộ vector theo `model_key`.
-
-#### Đánh giá mức tối ưu
-
-| Bộ lựa chọn | Tốc độ | Độ chính xác kỳ vọng | Offline | Độ phức tạp |
+| Bước | Công dụng | Đầu vào | Đầu ra cần lưu/đưa tiếp | Ghi chú triển khai |
 | --- | --- | --- | --- | --- |
-| MediaPipe BlazeFace short-range + MobileFaceNet-like ONNX | Cao | Trung bình đến tốt | Tốt | Trung bình |
-| MediaPipe BlazeFace short-range + ArcFace mobile ONNX | Khá cao | Tốt nếu model phù hợp | Tốt | Trung bình đến cao |
-| face-api.js end-to-end | Trung bình | Trung bình, cần đo | Tốt | Thấp |
-| Cloud-only AWS/Azure | Trung bình | Tốt | Không đạt | Thấp ở model, cao ở chi phí/tuân thủ |
-| Backend mạnh + client nhẹ | Online tốt, offline khá | Tốt online, khá offline | Tốt nếu có client fallback | Cao |
+| Face detect | Tìm xem trong ảnh/video có khuôn mặt hay không và mặt nằm ở đâu. | Frame camera, ảnh upload hoặc ảnh đã crop sơ bộ. | `bounding_box`, `confidence`, số lượng mặt. | Nếu không tìm thấy mặt hoặc có quá nhiều mặt, nên dừng nhận diện và yêu cầu chụp lại. |
+| Face quality | Kiểm tra ảnh mặt có đủ tốt để đăng ký hoặc check-in không. | Vùng mặt đã detect. | `quality_score`, blur, brightness, face size, góc mặt, trạng thái che khuất nếu có. | Bước này giúp giảm vector xấu; có thể dùng rule tự viết, landmark, hoặc quality signal từ cloud. |
+| Face alignment | Chuẩn hóa mặt về cùng góc nhìn, tỷ lệ và kích thước trước khi tạo embedding. | Bounding box và landmark mắt, mũi, miệng. | Ảnh mặt đã align, `alignment_method`, `face_crop_size`, `face_angle`. | Alignment ổn định làm embedding ít dao động hơn khi hội viên nghiêng đầu hoặc camera lệch. |
+| Face embedding | Biến ảnh mặt đã align thành vector số mô tả đặc trưng khuôn mặt. | Ảnh mặt chuẩn hóa, model embedding và runtime chạy model. | `embedding[]`, `model_key`, `embedding_size`, `quality_score`. | Đây là phần nhận diện cốt lõi nếu tự xử lý; model đổi thì vector cũ thường phải tạo lại. |
+| Face enrollment | Đăng ký khuôn mặt ban đầu cho hội viên, thường lấy nhiều ảnh tốt để tạo một hoặc nhiều vector chuẩn. | Ảnh đăng ký đã qua detect, quality và alignment. | `member_id`, `embedding_id`, `embedding[]`, `model_key`, ảnh nguồn hoặc attachment tham chiếu. | Chất lượng enrollment quyết định nhiều đến độ chính xác check-in; nên có quy trình chụp lại nếu ảnh mờ, tối hoặc lệch góc. |
+| Vector store | Lưu vector đăng ký của từng hội viên để phục vụ so khớp. | Embedding lúc đăng ký hoặc snapshot từ server. | `member_id`, `embedding_id`, `embedding[]`, `model_key`, `created_at`, `revoked_at`. | Offline-first cần cache vector ở IndexedDB; vector phải cùng `model_key` với embedding lúc check-in. |
+| Verify 1:1 | Kiểm tra một ảnh hiện tại có đúng là một hội viên cụ thể không. | Embedding hiện tại và vector của hội viên được chỉ định. | `similarity_score`, `threshold`, `status`. | Phù hợp khi người dùng đã nhập mã hội viên/QR/số điện thoại rồi hệ thống xác minh khuôn mặt. AWS gọi nhóm này là compare/verify; Azure có Verify. |
+| Identify 1:N | Tìm hội viên khớp nhất trong toàn bộ danh sách vector. | Embedding hiện tại và tập vector hội viên hợp lệ. | `matched_member_id`, `best_score`, `second_score`, `margin`, danh sách candidate. | Phù hợp kiosk tự nhận diện người bước vào. Cần kiểm tra khoảng cách giữa kết quả tốt nhất và tốt thứ hai để tránh nhận nhầm. |
+| Threshold & decision | Quyết định có cho check-in tự động hay chuyển fallback. | Điểm 1:1 hoặc 1:N, quality, margin, trạng thái hội viên, cooldown. | `PASSED`, `FAILED`, `AMBIGUOUS`, `fallback_reason`. | Không chỉ dựa vào điểm cao nhất; nên xét quality, threshold theo model, margin và nghiệp vụ hội viên. |
+| Audit & feedback | Lưu dấu vết để vận hành, debug và cải thiện model. | Kết quả nhận diện, ảnh/file, metadata thiết bị, vị trí, thời gian. | Audit check-in, attachment, `recognition_source`, `model_key`, `threshold`. | Đây là dữ liệu giúp điều chỉnh ngưỡng, so sánh model và phát hiện camera/ánh sáng kém ở từng cơ sở. |
 
-Lựa chọn đề xuất hiện tại: **MediaPipe BlazeFace short-range để phát hiện mặt, kết hợp một model embedding nhẹ chạy bằng ONNX Runtime Web trên client**. Backend nên dùng cùng model trong giai đoạn đầu để tránh phải lưu hai bộ vector khác nhau. Khi đã có dữ liệu vận hành thực tế, có thể thử backend model mạnh hơn để kiểm tra lại các trường hợp nhập nhằng.
+### Ba lớp kỹ thuật chính
+
+Luồng nhận diện khuôn mặt trên client nên tách thành ba lớp: **face detect**, **face alignment** và **face recognition**. Một công cụ phát hiện mặt tốt chưa đủ để nhận diện hội viên; nó chỉ tìm vùng mặt. Trước khi tạo embedding hoặc gọi API nhận diện, ảnh mặt nên được căn chỉnh để giảm sai lệch do nghiêng đầu, lệch camera hoặc crop không ổn định.
+
+#### Face detect
+
+| Lựa chọn | Hiệu suất | Accuracy / hiệu quả | Mức tối ưu | Hạn chế kỹ thuật |
+| --- | --- | --- | --- | --- |
+| MediaPipe Face Detector / BlazeFace | Cao trên browser, phù hợp xử lý realtime từ webcam. | Tốt với mặt gần camera, ánh sáng ổn và số người trong khung hình ít. | Rất phù hợp kiosk offline-first vì model nhẹ, chạy cục bộ và có thể cache. | Chỉ phát hiện mặt; không thay thế bước alignment, embedding hoặc so khớp hội viên. |
+| face-api.js TinyFaceDetector | Trung bình đến khá, phụ thuộc backend WebGL/CPU và kích thước input. | Đủ cho luồng cơ bản, nhưng cần đo lại với camera thật và điều kiện ánh sáng tại quầy. | Tối ưu trung bình; lợi thế là cùng hệ sinh thái với landmark/recognition nhưng không phải lựa chọn realtime mạnh nhất. | Model/weight cần tự quản; hiệu suất có thể kém hơn BlazeFace trên máy kiosk yếu. |
+| AWS Rekognition DetectFaces | Phụ thuộc mạng, kích thước ảnh và vùng cloud; không phù hợp xử lý từng frame realtime. | Tốt cho ảnh tĩnh gửi lên server, trả thêm landmark, pose, quality và attribute. | Tối ưu ở phía cloud, giảm công vận hành model nhưng không tối ưu cho offline/kiosk realtime. | Không chạy offline, phát sinh chi phí theo request, ảnh phải rời kiosk/hệ thống nội bộ. |
+| Azure Face Detect API | Phụ thuộc mạng và region; phù hợp xử lý ảnh theo request hơn là stream realtime. | Tốt cho ảnh tĩnh, có face rectangle, landmark, head pose và quality signal tùy model. | Tối ưu ở phía cloud, hữu ích cho kiểm tra ảnh đầu vào hoặc benchmark. | Một số năng lực bị giới hạn quyền truy cập; không offline và cần kiểm soát dữ liệu gửi cloud. |
+
+#### Face alignment
+
+| Lựa chọn | Hiệu suất | Accuracy / hiệu quả | Mức tối ưu | Hạn chế kỹ thuật |
+| --- | --- | --- | --- | --- |
+| Landmark 5 điểm tự triển khai | Rất cao vì chỉ là phép biến đổi hình học sau khi có landmark. | Hiệu quả tốt với mặt chính diện hoặc hơi nghiêng, đủ cho check-in phổ thông. | Tối ưu nhất cho offline-first vì nhẹ, kiểm soát được crop size và metadata. | Phụ thuộc chất lượng landmark đầu vào; kém với mặt nghiêng mạnh, che khuất hoặc biểu cảm lớn. |
+| MediaPipe Face Landmarker | Khá đến cao, nhưng nặng hơn detector đơn thuần. | Tốt hơn 5 điểm đơn giản khi cần nhiều landmark, pose và kiểm tra chất lượng mặt. | Tối ưu tốt cho browser hiện đại, phù hợp khi cần kiểm soát alignment kỹ hơn. | Cần benchmark trên máy kiosk thật; có thể quá nặng nếu yêu cầu chỉ là check-in nhanh. |
+| face-api.js landmark model | Trung bình, phụ thuộc backend và model weight. | Hiệu quả chấp nhận được cho pipeline JavaScript thống nhất, cần đo trên dữ liệu Gym thật. | Tối ưu trung bình; thuận lợi nếu đã chọn face-api.js cho cả detection/recognition. | Có thể kém ổn định hơn pipeline được tối ưu riêng; cần tự kiểm soát phiên bản weight. |
+| AWS Rekognition landmarks | Phụ thuộc network latency, không phù hợp alignment realtime trên từng frame. | Landmark/pose/quality hữu ích để đánh giá ảnh khó hoặc kiểm tra chất lượng phía server. | Tối ưu cho xử lý cloud theo request, không tối ưu cho pipeline offline. | Không phải hàm alignment trực tiếp; vẫn cần tự crop/căn chỉnh nếu muốn ảnh chuẩn hóa. |
+| Azure Face landmarks/head pose | Phụ thuộc network latency và giới hạn dịch vụ. | Landmark, head pose và quality signal giúp lọc ảnh đăng ký/nhận diện tốt hơn. | Tối ưu cho bước quality gate hoặc benchmark cloud, không tối ưu cho kiosk offline. | Không phải pipeline alignment cục bộ; bị ràng buộc quyền truy cập, mạng và chính sách dữ liệu. |
+
+#### Face recognition
+
+| Lựa chọn | Hiệu suất | Accuracy / hiệu quả | Mức tối ưu | Hạn chế kỹ thuật |
+| --- | --- | --- | --- | --- |
+| MobileFaceNet-like chạy bằng ONNX Runtime Web | Cao trên client, phù hợp kiosk cần phản hồi nhanh. | Trung bình đến tốt nếu ảnh đăng ký đủ chất lượng và alignment nhất quán. | Rất phù hợp offline-first: cache được model/vector, chi phí không tăng theo lượt check-in. | Cần chọn nguồn model tin cậy, tự benchmark threshold và xử lý ca nhập nhằng. |
+| ArcFace mobile chạy bằng ONNX Runtime Web | Khá đến cao, thường nặng hơn MobileFaceNet-like. | Tốt nếu chọn đúng backbone/mobile model và dữ liệu đăng ký đủ đa dạng. | Cân bằng tốt giữa accuracy và khả năng chạy cục bộ; dễ quản lý bằng `model_key`. | Có thể tăng latency trên máy yếu; khi đổi model thường phải re-embed dữ liệu hội viên. |
+| face-api.js FaceRecognitionNet | Trung bình, phụ thuộc WebGL/CPU và số lượng vector cần so. | Trung bình, cần đo lại với ảnh thật tại phòng gym và camera kiosk. | Tối ưu trung bình; phù hợp khi chấp nhận pipeline JavaScript thống nhất hơn là tối đa accuracy. | Ít linh hoạt nếu muốn thay model embedding riêng; cần kiểm soát chất lượng model/weight. |
+| AWS Rekognition CompareFaces / Face collections | Phụ thuộc mạng, kích thước ảnh và vùng cloud; không phù hợp offline. | Tốt cho so sánh 1:1 hoặc tìm trong collection khi ảnh đủ rõ. | Tối ưu ở phía cloud, giảm công vận hành model và scaling. | Không đáp ứng offline-first; phát sinh chi phí, dữ liệu khuôn mặt rời hệ thống, cần human review trong quyết định ảnh hưởng quyền truy cập. |
+| Azure Face Verify / Identify với PersonGroup | Phụ thuộc mạng, region và giới hạn dịch vụ; không phù hợp offline. | Tốt cho verify 1:1 hoặc identify 1:N khi được cấp quyền dùng nhận diện. | Tối ưu ở phía cloud với cấu trúc PersonGroup/LargePersonGroup. | Face recognition là năng lực limited access; phụ thuộc chính sách, chi phí giao dịch và kiểm soát dữ liệu sinh trắc. |
+
+Kết luận hiện tại: đường chính cho Gym nên là **MediaPipe Face Detector hoặc detector nhẹ tương đương + alignment 5 điểm + MobileFaceNet-like/ArcFace mobile chạy bằng ONNX Runtime Web**. AWS Rekognition và Azure Face nên được xem là phương án cloud để benchmark, kiểm tra lại ca nhập nhằng hoặc dùng cho hệ thống không yêu cầu offline-first, không nên là đường duy nhất cho kiosk Gym.
+
+### Kết nối camera ngoài trên website
+
+Website chỉ truy cập trực tiếp được các camera mà trình duyệt nhìn thấy như một thiết bị media input. Với kiosk Gym, webcam laptop và USB camera là hai lựa chọn đơn giản nhất vì có thể mở bằng `navigator.mediaDevices.getUserMedia()`.
+
+| Loại camera | Website truy cập trực tiếp | Cách triển khai phù hợp | Lưu ý |
+| --- | --- | --- | --- |
+| Webcam laptop | Có | Dùng `getUserMedia()` để lấy `MediaStream`. | Phù hợp demo hoặc quầy lễ tân đơn giản, nhưng góc đặt camera có thể không ổn định. |
+| USB camera | Có, nếu hệ điều hành nhận là camera | Dùng `enumerateDevices()` để chọn đúng camera, sau đó mở bằng `getUserMedia()`. | Phù hợp kiosk hơn webcam laptop vì dễ cố định góc nhìn và ánh sáng. |
+| IP camera / RTSP | Thường không trực tiếp | Cần backend hoặc local gateway chuyển RTSP sang WebRTC, HLS, MJPEG, hoặc dùng OBS Virtual Camera để biến luồng thành camera ảo. | Browser không đọc RTSP native; độ trễ và chất lượng frame phụ thuộc gateway. |
+
+Với luồng nhận diện, client nên detect mặt và kiểm tra chất lượng frame trước, sau đó chỉ capture và gửi frame tốt nhất lên backend hoặc dùng frame đó để tạo embedding cục bộ. Cách này giảm tải xử lý, giảm số ảnh xấu và giảm chi phí nếu có dùng cloud fallback.
+
+### Runtime chạy model trên client
+
+Runtime là lớp chạy model, không phải bản thân model nhận diện. Cùng một model embedding có thể chạy bằng nhiều backend khác nhau, nhưng mức ổn định và tốc độ sẽ khác nhau theo trình duyệt, CPU/GPU và operator mà model dùng.
+
+| Runtime | Chạy trên | Mức ổn định | Tốc độ | Operator support | Khuyến nghị |
+| --- | --- | --- | --- | --- | --- |
+| WASM | CPU | Cao nhất | Trung bình đến khá | Rộng và ổn định nhất | Nên dùng làm baseline production vì dễ dự đoán và ít phụ thuộc GPU. |
+| WebGPU | GPU | Khá, nhưng support chưa đều | Cao nhất nếu thiết bị hỗ trợ tốt | Đang cải thiện, chưa đồng đều như WASM | Dùng như acceleration optional, có fallback sang WASM. |
+| WebGL | GPU graphics pipeline | Ổn nhưng cũ | Có thể nhanh tùy model | Hạn chế với một số toán tử ML | Chỉ nên benchmark phụ hoặc dùng khi runtime/model hiện có hỗ trợ tốt. |
+| WebNN | CPU/GPU/NPU tùy browser và hardware | Mới, còn experimental | Tiềm năng cao | Chưa nên giả định đầy đủ | Chưa nên phụ thuộc production, nhưng đáng theo dõi cho thiết bị có NPU. |
+
+Với MVP offline-first, hướng thực tế là ưu tiên WASM để bảo đảm chạy được, sau đó bật WebGPU nếu môi trường kiosk đã được kiểm thử ổn định. Khi đổi runtime hoặc model, cần benchmark lại latency, memory và accuracy vì khác biệt numeric nhỏ cũng có thể ảnh hưởng điểm similarity quanh threshold.
+
+### Giới hạn cosine search cục bộ
+
+Khi client đã có embedding hiện tại, bước identify `1:N` thường là so cosine similarity với toàn bộ vector hội viên hợp lệ trong IndexedDB. Cách brute-force đơn giản có thể đủ tốt ở quy mô nhỏ, nhưng cần giới hạn rõ để tránh kiosk chậm khi số hội viên tăng.
+
+| Quy mô vector local | Cách so khớp phù hợp | Nhận xét |
+| ---: | --- | --- |
+| Dưới `10.000` vector | Brute-force cosine trên typed array | Thường đủ nhanh cho kiosk nếu vector được lưu dạng binary/typed array và chạy trong Web Worker. |
+| `10.000` đến `100.000` vector | Brute-force tối ưu, chia batch, Web Worker, cache norm | Vẫn có thể dùng được, nhưng cần đo latency trên máy thật và tránh block UI. |
+| Trên `100.000` vector | Cân nhắc ANN index như HNSW/WASM vector index hoặc chuyển search lên backend | Không nên quét tuyến tính trên main thread; cần kiến trúc tìm kiếm vector nghiêm túc hơn. |
+
+Ví dụ với embedding `512` chiều ở dạng `float32`, một vector raw chiếm khoảng `512 x 4 = 2.048 bytes`, tức gần `2 KB`. Nếu một hội viên có một vector, `10.000` hội viên cần khoảng `20 MB` chỉ cho vector, chưa tính metadata. Vì vậy client không nên sync toàn bộ dữ liệu hội viên; chỉ nên sync `member_id`, trạng thái tối thiểu, vector hợp lệ, `model_key`, `embedding_id` và các field cần thiết cho quyết định check-in.
 
 ## Phương án 2: Dùng dịch vụ đám mây
 
-Phương án này gửi ảnh hoặc vector lên dịch vụ như AWS Rekognition hoặc Azure Face để so sánh, tìm người hoặc xác thực. Dịch vụ cloud có lợi thế là model được nhà cung cấp vận hành sẵn, tài liệu đầy đủ và dễ tích hợp ở giai đoạn thử nghiệm.
+Phương án này gửi ảnh lên dịch vụ như AWS Rekognition hoặc Azure Face để so sánh, tìm người hoặc xác thực. Khi cần tìm kiếm 1:N, cloud thường yêu cầu đăng ký khuôn mặt vào collection, user/person hoặc PersonGroup do nhà cung cấp quản lý; hệ thống nhận lại `faceId`, candidate, similarity hoặc confidence, không nhận raw embedding để tự so khớp.
 
 ### Dịch vụ đại diện
 
@@ -135,131 +131,52 @@ Phương án này gửi ảnh hoặc vector lên dịch vụ như AWS Rekognitio
 | AWS Rekognition | So sánh khuôn mặt, tìm khuôn mặt trong collection, trả điểm tương đồng. | AWS cho phép đặt ngưỡng tương đồng; những tình huống ảnh hưởng đến quyền của cá nhân nên có rà soát của con người. |
 | Azure Face | Phát hiện, xác thực hoặc nhận diện khuôn mặt, trả thuộc tính và kết quả so khớp. | Một số năng lực nhận diện khuôn mặt của Azure có yêu cầu quyền truy cập hạn chế và chính sách trách nhiệm AI. |
 
-### Đánh giá
+### Độ khả dụng với stream video và offline
 
-| Tiêu chí | Mức đánh giá | Phân tích |
+Với Gym tại quầy, camera thường chạy như một luồng video liên tục. Cloud face recognition không nên nhận từng frame realtime từ stream vì chi phí, latency và băng thông sẽ tăng rất nhanh. Cách phù hợp hơn là client hoặc kiosk detect mặt trước, chọn frame tốt nhất, rồi chỉ gửi ảnh tĩnh lên cloud khi thật sự cần xác thực.
+
+| Tiêu chí | AWS Rekognition / Azure Face | Nhận xét cho Gym |
 | --- | --- | --- |
-| Độ chính xác | Tốt | Model được quản lý bởi nhà cung cấp, thường ổn định hơn ở giai đoạn đầu. |
-| Tốc độ | Trung bình | Phụ thuộc mạng, vùng triển khai, kích thước ảnh và tải dịch vụ. |
-| Hoạt động khi mất mạng | Không đáp ứng | Nếu không có mạng thì không thể nhận diện. Đây là điểm yếu lớn nhất với Gym. |
-| Chi phí | Trung bình đến cao | Tính theo lượt gọi hoặc theo tài nguyên cloud; Gym có tần suất check-in cao nên chi phí tăng theo quy mô. |
-| Quyền riêng tư | Cần đánh giá kỹ | Ảnh mặt hoặc dữ liệu sinh trắc học rời khỏi kiosk/hệ thống nội bộ. Cần xem xét đồng ý của người dùng, lưu trữ, vùng dữ liệu và thời hạn giữ dữ liệu. |
-| Khả năng vận hành | Dễ ở phần model, khó ở phần tuân thủ | Không phải tự vận hành model, nhưng cần kiểm soát bảo mật, chi phí, khóa API và quy định dữ liệu cá nhân. |
-
-### Khi nào nên chọn
-
-Phương án cloud phù hợp khi:
-
-- Hệ thống luôn có mạng ổn định.
-- Doanh nghiệp muốn đi nhanh, chưa có năng lực vận hành model.
-- Số lượt check-in không quá lớn hoặc chi phí API chấp nhận được.
-- Đã xử lý đầy đủ yêu cầu pháp lý về dữ liệu khuôn mặt.
-
-Với Gym trong nghiên cứu này, cloud **không nên là phương án duy nhất** vì không đáp ứng yêu cầu mất mạng vẫn check-in được.
+| Stream video liên tục | Không phù hợp làm đường chính cho check-in realtime từ browser. | Nếu gửi nhiều frame mỗi giây lên cloud, chi phí và độ trễ tăng mạnh; trải nghiệm check-in dễ bị chậm. |
+| Ảnh tĩnh sau khi chọn best frame | Phù hợp hơn. | Client detect/quality local trước, chỉ gửi một ảnh rõ mặt lên cloud để verify/search. |
+| Phụ thuộc mạng | Cao. | Upload ảnh, gọi API và nhận kết quả đều cần mạng ổn định; mạng yếu tại quầy sẽ ảnh hưởng trực tiếp tốc độ check-in. |
+| Khả năng offline | Không đáp ứng. | Khi mất mạng, cloud không thể verify/identify; kiosk phải fallback sang local model, QR, mã hội viên hoặc số điện thoại. |
+| Độ sẵn sàng vận hành | Phụ thuộc dịch vụ cloud, region, quota, rate limit và chính sách quyền truy cập. | Cần thiết kế timeout, retry, circuit breaker và fallback local để quầy không bị đứng khi API lỗi. |
 
 ## Phương án 3: Kết hợp trực tuyến và cục bộ
 
-Phương án kết hợp dùng xử lý cục bộ làm nền tảng để bảo đảm offline-first, đồng thời có thể dùng máy chủ nội bộ hoặc cloud khi có mạng để tăng chất lượng, kiểm tra lại hoặc cập nhật dữ liệu.
+Phương án hybrid dùng xử lý cục bộ làm đường chính cho kiosk, sau đó dùng cloud khi online để kiểm tra lại, benchmark hoặc xử lý ca nhập nhằng.
 
-Một kiến trúc hợp lý cho Gym:
-
-1. Kiosk tải model nhẹ, danh sách hội viên, embedding và ngưỡng nhận diện về local.
-2. Khi có mạng, kiosk có thể gọi API nội bộ để nhận diện hoặc kiểm tra kết quả.
-3. Khi mất mạng, kiosk nhận diện trực tiếp trong browser bằng dữ liệu đã cache.
-4. Check-in và audit được lưu tạm trong IndexedDB.
-5. Khi có mạng lại, kiosk đồng bộ check-in, ảnh và metadata về máy chủ.
-
-### Đánh giá
-
-| Tiêu chí | Mức đánh giá | Phân tích |
+| Tiêu chí | Mức đánh giá | Trade-off chính |
 | --- | --- | --- |
-| Độ chính xác | Tốt nếu triển khai đúng | Online có thể dùng pipeline mạnh hơn; offline dùng model nhẹ đủ đáp ứng vận hành. |
-| Tốc độ | Tốt | Kiosk không phải chờ cloud trong mọi lượt check-in. Dữ liệu đã cache giúp phản hồi nhanh. |
-| Hoạt động khi mất mạng | Rất tốt | Đáp ứng yêu cầu bắt buộc của Gym. |
-| Chi phí | Trung bình | Tốn công xây dựng đồng bộ và cache, nhưng giảm phụ thuộc chi phí theo request cloud. |
-| Quyền riêng tư | Tốt | Có thể giữ phần lớn ảnh và embedding trong hệ thống nội bộ; cloud nếu dùng thì chỉ là tùy chọn. |
-| Khả năng vận hành | Trung bình đến khó | Cần quản lý version model, snapshot, queue, sync và chống gửi trùng. |
-
-### Khi nào nên chọn
-
-Phương án kết hợp phù hợp khi:
-
-- Offline-first là yêu cầu bắt buộc.
-- Vẫn muốn có khả năng nâng chất lượng nhận diện theo thời gian.
-- Cần cân bằng tốc độ, chi phí và quyền riêng tư.
-- Chấp nhận thiết kế thêm tầng đồng bộ dữ liệu local.
-
-## Bảng so sánh chi tiết
-
-Thang điểm: 1 là yếu, 5 là tốt. Điểm này phục vụ định hướng kiến trúc ban đầu, không thay thế benchmark thực tế.
-
-| Tiêu chí | Tự xử lý trong hệ thống | Dịch vụ đám mây | Kết hợp |
-| --- | ---: | ---: | ---: |
-| Độ chính xác ban đầu | 3 | 4 | 4 |
-| Khả năng cải thiện theo dữ liệu riêng | 5 | 3 | 5 |
-| Tốc độ tại quầy | 4 | 3 | 4 |
-| Hoạt động khi mất mạng | 5 | 1 | 5 |
-| Chi phí khi số lượt check-in tăng | 5 | 2 | 4 |
-| Bảo vệ dữ liệu khuôn mặt | 5 | 2 | 4 |
-| Dễ triển khai thử nghiệm nhanh | 3 | 4 | 3 |
-| Dễ vận hành lâu dài | 3 | 3 | 4 |
+| Accuracy | Tốt hơn local-only nếu có tầng online kiểm tra lại ca khó. | Độ chính xác vẫn phụ thuộc chất lượng ảnh đăng ký, alignment và ngưỡng local; cloud chỉ nên hỗ trợ ca nhập nhằng. |
+| Speed | Nhanh ở luồng thường vì kiosk quyết định cục bộ. | Những ca cần gọi cloud sẽ chậm hơn do network latency. |
+| Offline | Tốt nếu client có model, vector hội viên và threshold trong IndexedDB. | Cloud không trả raw embedding để kiosk tự so offline, nên vẫn phải duy trì model/vector nội bộ. |
+| Cost | Kiểm soát tốt hơn cloud-only vì không gọi API cho mọi lượt check-in. | Chi phí tăng nếu gửi nhiều ca lên cloud để xác minh lại hoặc benchmark. |
+| Privacy | Tốt hơn cloud-only vì phần lớn ảnh/vector có thể xử lý trong hệ thống nội bộ. | Các ca gửi cloud vẫn cần chính sách dữ liệu, consent, retention và audit rõ ràng. |
 
 ## Ước tính chi phí
 
-Chi phí cần được tách thành hai nhóm: chi phí triển khai ban đầu và chi phí vận hành hằng tháng. Với Gym, số lượt nhận diện có thể tăng nhanh vì mỗi hội viên có thể check-in và check-out nhiều lần trong tháng. Do đó, phương án tính phí theo từng lượt gọi API cần được tính trước khi chọn kiến trúc.
+Với Gym, số lượt nhận diện có thể tăng nhanh vì mỗi hội viên có thể check-in và check-out nhiều lần trong tháng. Nếu dùng cloud cho nhận diện khuôn mặt, chi phí nên được tính theo số request hằng tháng trước khi chọn kiến trúc.
 
-Các con số dưới đây là tham khảo tại thời điểm nghiên cứu ngày 24/06/2026. Giá cloud có thể thay đổi theo vùng, loại tài khoản, gói cam kết, tiền tệ và chính sách của nhà cung cấp.
+Các con số dưới đây là tham khảo tại thời điểm nghiên cứu ngày 25/06/2026. Giá cloud có thể thay đổi theo vùng, loại tài khoản, gói cam kết, tiền tệ và chính sách của nhà cung cấp.
 
-### Tự xử lý trong hệ thống
+Với AWS Rekognition, nhóm API liên quan đến so sánh/tìm kiếm khuôn mặt như `CompareFaces`, `IndexFaces`, `SearchFacesByImage`, `SearchFaces` thuộc Group 1. Trang giá AWS nêu mức **0.001 USD cho mỗi ảnh** ở một triệu ảnh đầu tiên của nhóm này. Nếu dùng collection để tìm kiếm khuôn mặt, AWS còn tính phí lưu face/user vector theo tháng.
 
-| Nhóm chi phí | Cách phát sinh | Nhận xét |
+Với Azure Face, gói Standard Web tính theo mỗi 1.000 transaction. Azure pricing có free tier **30.000 transaction/tháng** ở một số vùng. Ví dụ dưới đây dùng giả định giá Standard Web là **1 USD / 1.000 transaction** theo Azure Retail Prices tại thời điểm tra cứu; khi lập dự toán thật nên chốt lại bằng Azure Pricing Calculator theo region và offer đang dùng.
+
+| Quy mô request/tháng | AWS Rekognition Group 1 | Azure Face Standard Web |
 | --- | --- | --- |
-| Camera tại quầy | Mua một lần cho từng kiosk | Nên ưu tiên camera đủ sáng, rõ mặt, ổn định hơn là camera quá rẻ. |
-| Máy tính/kiosk | Mua hoặc tận dụng thiết bị hiện có | Model chạy local cần CPU đủ tốt; nếu dùng WebGL/WebGPU thì GPU tích hợp cũng ảnh hưởng tốc độ. |
-| Phát triển phần mềm | Chi phí một lần và cải tiến định kỳ | Bao gồm capture camera, đăng ký mặt, tạo embedding, so khớp, lưu queue và đồng bộ. |
-| Bảo trì model | Chi phí định kỳ | Cần đo sai số, cập nhật threshold, xử lý ảnh mờ, ảnh thiếu sáng và thay đổi camera. |
-| Phí theo lượt nhận diện | Gần như không có | TensorFlow.js, MediaPipe, ONNX Runtime Web và face-api.js không tạo chi phí API theo từng lượt gọi; chi phí nằm ở thiết bị và công vận hành. |
+| 100.000 request | `100.000 x 0.001 USD` = khoảng `100 USD/tháng` | `100.000 / 1.000 x 1 USD` = khoảng `100 USD/tháng`; nếu trừ free tier 30.000 thì còn khoảng `70 USD/tháng`. |
+| 1.000.000 request | `1.000.000 x 0.001 USD` = khoảng `1.000 USD/tháng` | `1.000.000 / 1.000 x 1 USD` = khoảng `1.000 USD/tháng`; nếu trừ free tier 30.000 thì còn khoảng `970 USD/tháng`. |
 
-Ưu điểm lớn của hướng này là chi phí không tăng tuyến tính theo số lượt check-in. Khi số cơ sở hoặc số lượt check-in tăng, chi phí chính vẫn là thiết bị, bảo trì và nâng cấp phần mềm.
-
-### Dịch vụ đám mây
-
-Với AWS Rekognition, nhóm API liên quan đến so sánh/tìm kiếm khuôn mặt như `CompareFaces`, `IndexFaces`, `SearchFacesByImage`, `SearchFaces` thuộc nhóm tính phí theo số ảnh xử lý. Trang giá AWS hiện nêu mức **0.001 USD cho mỗi ảnh** ở một triệu ảnh đầu tiên của nhóm này. Nếu dùng tìm kiếm khuôn mặt theo collection, AWS còn tính phí lưu metadata khuôn mặt, ví dụ **0.00001 USD cho mỗi face vector mỗi tháng**. Nếu bật Face Liveness, giá tham khảo cho 500.000 lượt đầu ở ví dụ AWS là **0.015 USD cho mỗi lượt kiểm tra**.
-
-| Quy mô giả định | Công thức đơn giản với AWS Rekognition Group 1 | Chi phí nhận diện ước tính |
-| --- | --- | --- |
-| 10.000 lượt nhận diện/tháng | `10.000 x 0.001 USD` | Khoảng `10 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
-| 100.000 lượt nhận diện/tháng | `100.000 x 0.001 USD` | Khoảng `100 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
-| 1.000.000 lượt nhận diện/tháng | `1.000.000 x 0.001 USD` | Khoảng `1.000 USD/tháng`, chưa gồm lưu trữ face metadata và truyền dữ liệu. |
-
-Với Azure Face, trang pricing cho biết gói miễn phí web có **30.000 giao dịch miễn phí mỗi tháng** ở một số vùng, còn gói Standard tính theo mỗi 1.000 giao dịch và có thêm các hạng mục như Face Storage, Train Person Group/Array, Face Liveness và Face Liveness + Verification. Tuy nhiên, giá cụ thể trên trang có thể phụ thuộc vùng/currency và nên chốt bằng Azure Pricing Calculator trước khi lập dự toán chính thức.
-
-| Nhóm chi phí cloud | AWS Rekognition | Azure Face |
-| --- | --- | --- |
-| Nhận diện/xác thực | Tính theo ảnh/API call; nhóm face search/compare có ví dụ 0.001 USD/ảnh ở mức đầu. | Tính theo mỗi 1.000 transaction ở gói Standard; có free tier 30.000 transaction/tháng ở một số vùng. |
-| Lưu dữ liệu khuôn mặt | Tính theo face/user vector lưu mỗi tháng. | Có Face Storage tính theo số khuôn mặt lưu. |
-| Liveness | Tính riêng theo lượt kiểm tra. | Tính riêng cho Face Liveness hoặc Liveness + Verification. |
-| Truyền dữ liệu | Có thể phát sinh theo hạ tầng cloud/storage/network. | Có thể phát sinh theo hạ tầng cloud/storage/network. |
-
-Điểm cần lưu ý: cloud có vẻ rẻ khi số lượt thấp, nhưng Gym có tính lặp cao. Một cơ sở có 500 hội viên, mỗi hội viên trung bình 10 lần đến phòng tập mỗi tháng và mỗi lần có check-in/check-out sẽ tạo khoảng `500 x 10 x 2 = 10.000` lượt nhận diện/tháng. Khi nhân lên nhiều cơ sở, chi phí API tăng trực tiếp theo số lượt.
-
-### Mô hình kết hợp
-
-Mô hình kết hợp có chi phí nằm giữa hai hướng trên. Hệ thống vẫn cần đầu tư phần xử lý cục bộ, nhưng có thể giới hạn cloud hoặc server-side recognition cho các trường hợp cần kiểm tra lại.
-
-| Chiến lược dùng cloud | Cách tính chi phí | Ý nghĩa |
-| --- | --- | --- |
-| Cloud cho mọi lượt check-in | Chi phí tăng theo toàn bộ lượt nhận diện. | Dễ triển khai nhưng không phù hợp yêu cầu mất mạng và tốn chi phí khi mở rộng. |
-| Cloud chỉ khi local không chắc chắn | Chỉ gửi những lượt có điểm thấp, mặt mờ hoặc kết quả nhập nhằng. | Giảm chi phí đáng kể, vẫn có tầng kiểm tra mạnh hơn. |
-| Cloud chỉ dùng giai đoạn thử nghiệm | Dùng cloud để so sánh chất lượng với local trong giai đoạn benchmark. | Phù hợp để chọn threshold/model mà không phụ thuộc cloud lâu dài. |
-
-Với nghiên cứu hiện tại, hướng hợp lý là **không dùng cloud cho mọi lượt check-in**. Cloud nếu dùng nên đóng vai trò tham chiếu hoặc kiểm tra lại trong các ca không chắc chắn.
+Các con số trên chỉ tính request nhận diện/xác thực cơ bản. Chưa tính lưu trữ face vector, Face Liveness, truyền dữ liệu, lưu ảnh, thuế, chiết khấu cam kết hoặc khác biệt giá theo vùng.
 
 ## Lựa chọn hợp lý cho nghiên cứu này
 
 Lựa chọn hợp lý là **mô hình kết hợp, ưu tiên xử lý cục bộ**.
 
-Lý do:
+Lý do chính:
 
 1. Gym bắt buộc check-in được khi mất mạng, nên cloud-only bị loại khỏi phương án chính.
 2. Camera hiện tại không quá tốt, người dùng ưu tiên tốc độ và khả năng vào phòng tập hơn độ chính xác tuyệt đối.
@@ -325,5 +242,9 @@ Các dữ liệu này giúp nhóm phát triển tinh chỉnh ngưỡng, so sánh
 - [Google AI Edge: MediaPipe Face Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker)
 - [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/)
 - [face-api.js](https://justadudewhohacks.github.io/face-api.js/docs/index.html)
+- [AWS Rekognition pricing](https://aws.amazon.com/rekognition/pricing/)
+- [AWS Rekognition: Detecting faces in an image](https://docs.aws.amazon.com/rekognition/latest/dg/faces-detect-images.html)
 - [AWS Rekognition: Comparing faces in images](https://docs.aws.amazon.com/rekognition/latest/dg/faces-comparefaces.html)
-- [Microsoft Azure Face service](https://learn.microsoft.com/en-us/azure/ai-services/face/overview-identity)
+- [Azure Face API pricing](https://azure.microsoft.com/en-us/pricing/details/cognitive-services/face-api/)
+- [Azure Face: Face detection, attributes, and input data](https://learn.microsoft.com/en-us/azure/ai-services/face/concept-face-detection)
+- [Azure Face: Face recognition](https://learn.microsoft.com/en-us/azure/ai-services/face/concept-face-recognition)
